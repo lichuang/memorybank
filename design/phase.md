@@ -1,37 +1,37 @@
-# memorybank 实现步骤（分阶段任务清单）
+# memorybank Implementation Steps (Phased Task List)
 
-依据：`design.md`（实现设计）、`memory-schema.md`（逻辑表结构定稿）。
+Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
-> **状态标记约定**：每个任务下的 `**状态**` 行用 **✅ 已完成 / ❌ 未完成** 标记；完成时把 ❌ 改为 ✅（建议附日期/提交号）。
-> 当前进度：**P0 0/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8（合计 0/65，全部 ❌）**
+> **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
+> Current progress: **P0 0/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (0/65 total, all ❌)**
 
-## 通用约定（所有步骤默认遵守，不再重复）
+## Common Conventions (apply to every step; not repeated below)
 
-- **异步**：port 与编排全部 `async`（`async-trait`）；`retain` 的"同步语义"指 `.await` 直到本次 chunks 全 done，不是阻塞线程。
-- **错误**：`engine::Error`（Retryable/Fatal/Config/NotFound/Conflict）；worker 只重试 Retryable；测试用 `anyhow` 辅助。
-- **ID**：UUIDv7，engine 在**事务前**分配（`FactId::new()`），Store 只负责持久化——避免"插入才能拿到 id"的回溯依赖。
-- **测试**：单测在模块内；集成测试在 `crates/*/tests/`；所有时间走 `Clock` 注入；SQLite 内存库每测试独立。
-- **配置**：`engine::Config`（分块/检索/建链/强化/调度阈值），serde 反序列化，engine 不读环境变量（由 facade 注入）。
+- **Async**: ports and orchestration are all `async` (`async-trait`); retain's "synchronous semantics" means `.await` until this call's chunks are all done — it does not block a thread.
+- **Errors**: `engine::Error` (Retryable/Fatal/Config/NotFound/Conflict); workers retry only Retryable; tests may use `anyhow` helpers.
+- **IDs**: UUIDv7, allocated in **engine before the transaction** (`FactId::new()`); `Store` only persists them — avoiding the backtracking dependency of "insert before you get an id".
+- **Testing**: unit tests beside the module; integration tests in `crates/*/tests/`; all time goes through an injected `Clock`; an isolated in-memory SQLite database per test.
+- **Configuration**: `engine::Config` (chunking/retrieval/linking/reinforcement/scheduling thresholds), serde-deserialized; engine reads no environment variables (the facade injects them).
 
 ---
 
-# P0 · 地基
+# P0 · Foundation
 
-## P0-1 Workspace 骨架
+## P0-1 Workspace Skeleton
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：根 `Cargo.toml`（workspace + package `memorybank`）、`crates/{engine,store,llm}`、`rustfmt.toml`、clippy lints、CI 脚本。
-- **设计**：workspace members；features：`store/sqlite`（默认）、`store/postgres`（后置）；`llm/http`。
-- **验收**：`cargo check/clippy/fmt --workspace` 全绿；`cargo tree` 无反向依赖（engine 不依赖 store/llm）。
-- **测试**：CI 跑 `cargo test --workspace`。
+- **Content**: root `Cargo.toml` (workspace + package `memorybank`), `crates/{engine,store,llm}`, `rustfmt.toml`, clippy lints, CI script.
+- **Design**: workspace members; features: `store/sqlite` (default), `store/postgres` (later); `llm/http`.
+- **Acceptance**: `cargo check/clippy/fmt --workspace` all green; `cargo tree` shows no reverse dependencies (engine does not depend on store/llm).
+- **Tests**: CI runs `cargo test --workspace`.
 
-## P0-2 ID 与时间基元
+## P0-2 ID and Time Primitives
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：5 个 ID newtype + 时间别名。
-- **设计**：
+- **Content**: 5 ID newtypes + a time alias.
+- **Design**:
 ```rust
 macro_rules! id_type { ($n:ident) => {
   #[derive(Clone,Copy,PartialEq,Eq,Hash,PartialOrd,Ord,Serialize,Deserialize)]
@@ -43,20 +43,20 @@ id_type!(BankId); id_type!(SourceId); id_type!(ChunkId); id_type!(FactId); id_ty
 pub type Timestamp = chrono::DateTime<Utc>;
 pub fn now_ts(clock:&dyn Clock) -> Timestamp
 ```
-- **验收**：serde 往返；UUIDv7 按创建时间可排序。
-- **测试**：roundtrip；连续 new() 的字典序单调。
+- **Acceptance**: serde round-trip; UUIDv7 ordering is creation-time ordered.
+- **Tests**: round-trip; lexicographic monotonicity across successive `new()` calls.
 
-## P0-3 领域枚举与结构
+## P0-3 Domain Enums and Structs
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：全部核心枚举/行结构。
-- **设计**：
+- **Content**: all core enums/row structs.
+- **Design**:
 ```rust
 pub enum FactType { World, Experience, Opinion, Observation }
 pub enum LinkType { Temporal, Semantic, Causal }
 pub enum ChunkStatus { Pending, Extracting, Done, Failed }
-pub enum CausalRelation { Causes, CausedBy, Enables, Prevents }   // 归一化待拍板
+pub enum CausalRelation { Causes, CausedBy, Enables, Prevents }   // normalization pending decision
 pub enum EntityKind { Person, Organization, Location, Product, Concept, Other }
 pub enum SourceStatus { Received, Chunked }
 pub enum SourceKind { Transcript, Document, Message, Api }
@@ -77,15 +77,15 @@ pub struct FactEntity { bank_id, fact_id, entity_id, mention_text: Option<String
 pub struct FactLink { id, bank_id, from_fact_id, to_fact_id, link_type: LinkType,
                       relation: Option<CausalRelation>, weight: f32 }
 ```
-- **验收**：与 `memory-schema.md` §3 字段一一对应；不变量写在类型注释（observation⇒chunk_id=None；reflect opinion⇒chunk_id=None 且 confidence 必填）。
-- **测试**：`BankProfile::validate` 边界矩阵（0/1/5/6）。
+- **Acceptance**: one-to-one correspondence with `memory-schema.md` §3; invariants documented in type comments (observation ⇒ chunk_id=None; reflect opinion ⇒ chunk_id=None and confidence required).
+- **Tests**: `BankProfile::validate` boundary matrix (0/1/5/6).
 
-## P0-4 结构化输出 DTO（论文 A.5.1/A.2/A.3）
+## P0-4 Structured Output DTOs (paper A.5.1/A.2/A.3)
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：LLM 往返契约 + JSON Schema（schemars）。
-- **设计**：
+- **Content**: LLM round-trip contracts + JSON Schema (schemars).
+- **Design**:
 ```rust
 pub struct ExtractedFact { pub what: String, pub when: String, pub where_: String, pub who: String,
   pub why: String, pub fact_type: FactType, pub occurred_start: Option<Timestamp>,
@@ -101,24 +101,24 @@ pub struct Assessment { pub verdict: AssessmentVerdict, pub reason: String } // 
 pub struct ObservationDraft { pub observation: String }
 pub struct ObservationResponse { pub observations: Vec<ObservationDraft> }
 ```
-- **验收**：`schema_for!` 快照与论文附录字段名对齐（`where` 用 serde rename）。
-- **测试**：fixtures 反序列化（含缺省字段/错误类型）。
+- **Acceptance**: `schema_for!` snapshots align with the paper appendix field names (`where` via serde rename).
+- **Tests**: fixture deserialization (including defaulted fields / wrong types).
 
-## P0-5 错误体系
+## P0-5 Error System
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：`engine::Error` + 重试判定。
-- **设计**：`pub fn is_retryable(&self)->bool`；Store/Llm 错误经 `From` 转换；`NotFound(&'static str, String)`。
-- **验收**：LLM 超时/DB busy → Retryable；schema 解析失败 → Fatal；profile 越界 → Config。
-- **测试**：`is_retryable` 矩阵。
+- **Content**: `engine::Error` + retry classification.
+- **Design**: `pub fn is_retryable(&self)->bool`; Store/Llm errors converted via `From`; `NotFound(&'static str, String)`.
+- **Acceptance**: LLM timeout/DB busy → Retryable; schema parse failure → Fatal; profile out of range → Config.
+- **Tests**: `is_retryable` matrix.
 
-## P0-6 模型类 ports
+## P0-6 Model Ports
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：`Llm/Embedder/Reranker/TemporalParser/Clock`。
-- **设计**：
+- **Content**: `Llm/Embedder/Reranker/TemporalParser/Clock`.
+- **Design**:
 ```rust
 pub struct JsonRequest { pub system: Option<String>, pub user: String,
   pub schema_name: &'static str, pub schema: serde_json::Value,
@@ -134,15 +134,15 @@ pub struct TimeRange { pub start: Timestamp, pub end: Timestamp }
 pub trait TemporalParser: Send+Sync { fn parse(&self, q:&str, now: Timestamp)->Option<TimeRange>; }
 pub trait Clock: Send+Sync { fn now(&self)->Timestamp; }
 ```
-- **验收**：`Box<dyn Llm>` 可用；schema 作为参数传入（无需泛型 schema bound）。
-- **测试**：空实现编译 + dyn 调用。
+- **Acceptance**: `Box<dyn Llm>` works; schema is passed as an argument (no generic schema bound needed).
+- **Tests**: empty impl compiles + dyn invocation.
 
-## P0-7 Store port（方法集）
+## P0-7 Store Port (Method Set)
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：全部存储契约 + DTO。
-- **设计**：
+- **Content**: the full storage contract + DTOs.
+- **Design**:
 ```rust
 pub struct NewSource { bank_id, kind, title, payload_text }
 pub struct NewChunk { bank_id, source_id, chunk_index, text, content_hash, time_start, time_end }
@@ -162,22 +162,22 @@ pub struct WorkLists { pub sources_received: Vec<SourceId>, pub chunks_pending: 
   pub entities_stale_observation: Vec<EntityId> }
 
 #[async_trait] pub trait Store: Send+Sync {
-  // bank/收件箱
+  // bank/inbox
   async fn create_bank(&self, name:&str, profile:BankProfile)->Result<BankId>;
   async fn load_bank(&self, id:BankId)->Result<Bank>;
   async fn create_source(&self, s:NewSource)->Result<SourceId>;
-  async fn append_chunks(&self, src:SourceId, chunks:Vec<NewChunk>)->Result<usize>; // 返回新插入数
+  async fn append_chunks(&self, src:SourceId, chunks:Vec<NewChunk>)->Result<usize>; // returns inserted count
   async fn claim_chunk(&self, bank:BankId, stale_after:Duration)->Result<Option<ClaimedChunk>>;
   async fn release_chunk(&self, chunk:ChunkId)->Result<()>;
   async fn commit_chunk(&self, c:ChunkCommit)->Result<()>;
-  // 检索
+  // retrieval
   async fn search_vector(&self, bank:BankId, q:&[f32], k:usize)->Result<Vec<(FactId,f32)>>;
   async fn search_bm25(&self, bank:BankId, q:&str, k:usize)->Result<Vec<(FactId,f32)>>;
   async fn neighbors(&self, bank:BankId, from:FactId)->Result<Vec<Neighbor>>;
   async fn facts_in_range(&self, bank:BankId, r:TimeRange)->Result<Vec<FactId>>;
   async fn fetch_facts(&self, ids:&[FactId])->Result<Vec<Fact>>;
   async fn increment_access(&self, ids:&[FactId])->Result<()>;
-  // 实体/意见/观察/维护
+  // entity/opinion/observation/maintenance
   async fn ensure_entity(&self, bank:BankId, name:&str, kind:EntityKind)->Result<(EntityId,bool)>;
   async fn entity_candidates(&self, bank:BankId, mention:&str)->Result<Vec<EntityCandidate>>;
   async fn insert_opinion(&self, o:NewOpinion)->Result<FactId>;
@@ -190,74 +190,74 @@ pub struct WorkLists { pub sources_received: Vec<SourceId>, pub chunks_pending: 
 pub struct Neighbor { pub fact_id: FactId, pub link_type: LinkType, pub weight: f32 }
 pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>, pub last_mention_at: Option<Timestamp> }
 ```
-- **关键语义**（写进 trait 文档注释）：`claim_chunk` 原子认领并回收过期 extracting；`commit_chunk` 单事务含 status→done；`append_chunks` 哈希冲突跳过；`neighbors` 合并 `fact_link` 与 `fact_entity` 推导邻接。
-- **验收**：trait object-safe；DTO 无后端类型泄漏。
-- **测试**：编译期 object safety 测试；DTO serde。
+- **Key semantics** (documented in trait doc comments): `claim_chunk` claims atomically and reclaims stale `extracting` rows; `commit_chunk` flips status→done in the same transaction; `append_chunks` skips hash conflicts; `neighbors` merges `fact_link` with adjacency derived from `fact_entity`.
+- **Acceptance**: the trait is object-safe; DTOs leak no backend types.
+- **Tests**: compile-time object-safety test; DTO serde.
 
-## P0-8 Store 形态定稿
+## P0-8 Store Shape Finalization
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：单 trait 决策落地 + 拆分预案注释（读/写/维护）。
-- **验收**：`let s: Box<dyn Store>` 编译；文档记录拆分触发条件（某后端只支持只读等）。
-- **测试**：dyn 注入冒烟。
+- **Content**: land the single-trait decision + a note on the splitting contingency (read/write/maintenance).
+- **Acceptance**: `let s: Box<dyn Store>` compiles; the doc records the trigger for splitting (e.g. a read-only backend).
+- **Tests**: dyn injection smoke test.
 
-## P0-9 migration 0001（SQLite）
+## P0-9 Migration 0001 (SQLite)
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：7 表 DDL + FTS + 索引 + 约束。
-- **设计**：
-  - 表按 schema 字段；FTS5：`CREATE VIRTUAL TABLE fact_fts USING fts5(fact_id UNINDEXED, text, tokenize='trigram')`（手动维护）；
-  - 唯一：`chunk(bank_id, content_hash)`、`entity(bank_id, canonical_name)`、`fact_link(from_fact_id, to_fact_id, link_type, relation)`；
-  - CHECK：枚举值域；`(fact_type='opinion' AND chunk_id IS NULL) => confidence IS NOT NULL`；
-  - 索引：`fact(bank_id)`、`fact(chunk_id)`、`fact(bank_id, occurred_start)`、`source(bank_id,status)`、`fact_entity(bank_id, entity_id)`、`fact_entity(bank_id, fact_id)`、`fact_link(bank_id, from_fact_id)`、`fact_link(bank_id, to_fact_id)`。
-- **验收**：与 `memory-schema.md` §3 逐条核对表（在 migration 文件头列 checklist）。
-- **测试**：约束违规（重复哈希、重复规范名、confidence 缺失）；FTS 插入/查询。
+- **Content**: 7-table DDL + FTS + indexes + constraints.
+- **Design**:
+  - Tables follow the schema fields; FTS5: `CREATE VIRTUAL TABLE fact_fts USING fts5(fact_id UNINDEXED, text, tokenize='trigram')` (maintained manually);
+  - Unique: `chunk(bank_id, content_hash)`, `entity(bank_id, canonical_name)`, `fact_link(from_fact_id, to_fact_id, link_type, relation)`;
+  - CHECK: enum domains; `(fact_type='opinion' AND chunk_id IS NULL) => confidence IS NOT NULL`;
+  - Indexes: `fact(bank_id)`, `fact(chunk_id)`, `fact(bank_id, occurred_start)`, `source(bank_id,status)`, `fact_entity(bank_id, entity_id)`, `fact_entity(bank_id, fact_id)`, `fact_link(bank_id, from_fact_id)`, `fact_link(bank_id, to_fact_id)`.
+- **Acceptance**: a line-by-line checklist against `memory-schema.md` §3 in the migration header.
+- **Tests**: constraint violations (duplicate hash, duplicate canonical name, missing confidence); FTS insert/query.
 
-## P0-10 migration runner + 测试库 helper
+## P0-10 Migration Runner + Test DB Helper
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：`store::migrate(&SqlitePool)`；`store::testing::memory_pool()`。
-- **验收**：migrate 幂等（跑两次）；测试库每次独立。
-- **测试**：两次 migrate；并发连接 basic。
+- **Content**: `store::migrate(&SqlitePool)`; `store::testing::memory_pool()`.
+- **Acceptance**: migrations are idempotent (run twice); each test database is isolated.
+- **Tests**: run migrate twice; basic concurrent connections.
 
-## P0-11 fakes
+## P0-11 Fakes
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：确定性测试替身。
-- **设计**：
+- **Content**: deterministic test doubles.
+- **Design**:
 ```rust
 pub struct FakeLlm { scripted: Mutex<HashMap<&'static str, VecDeque<serde_json::Value>>>, calls: Mutex<Vec<JsonRequest>> }
 impl FakeLlm { pub fn push(&self, schema_name:&'static str, value:serde_json::Value); pub fn calls(&self)->Vec<JsonRequest>; }
-pub struct HashEmbedder { dim: usize }        // 字符 n-gram 哈希 → 归一化向量
+pub struct HashEmbedder { dim: usize }        // character n-gram hash → normalized vector
 pub struct IdentityReranker;
-pub struct RuleTemporalParser;                 // "yesterday"/"last week"/ISO 日期
+pub struct RuleTemporalParser;                 // "yesterday"/"last week"/ISO dates
 pub struct FixedClock(pub Timestamp);
 ```
-- **验收**：同输入同输出；`FakeLlm` 可断言 prompt 内容（画像口头化测试用）。
-- **测试**：嵌入确定性/维度；FakeLlm 队列耗尽返回 Fatal。
+- **Acceptance**: same input, same output; `FakeLlm` allows asserting prompt content (for profile-verbalization tests).
+- **Tests**: embedding determinism/dimension; FakeLlm returns Fatal when the queue is exhausted.
 
-## P0-12 P0 冒烟
+## P0-12 P0 Smoke Test
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：bank→source→chunks→claim/release 集成测试。
-- **验收**：全绿；`cargo doc` 无 broken link。
-- **测试**：`crates/store/tests/smoke.rs`。
+- **Content**: bank→source→chunks→claim/release integration test.
+- **Acceptance**: all green; `cargo doc` has no broken links.
+- **Tests**: `crates/store/tests/smoke.rs`.
 
 ---
 
 # P1 · retain
 
-## P1-1 载荷规范化
+## P1-1 Payload Normalization
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：把调用方输入转成规范文本 + 轮次视图。
-- **设计**：
+- **Content**: turn caller input into canonical text + a turn view.
+- **Design**:
 ```rust
 pub struct RawTurn { pub speaker: String, pub text: String, pub at: Option<Timestamp>, pub session: Option<u32> }
 pub enum RawPayload { Transcript { title: Option<String>, turns: Vec<RawTurn> }, Document { title: Option<String>, text: String } }
@@ -265,545 +265,545 @@ pub struct TurnSpan { pub byte_start: usize, pub byte_end: usize, pub at: Option
 pub struct NormalizedPayload { pub text: String, pub spans: Vec<TurnSpan> }
 pub fn normalize(p: RawPayload) -> NormalizedPayload   // "[<ts>] <speaker>: <text>\n"
 ```
-- **验收**：Document 直通；Transcript 保留时间/会话标记；span 可逆（切片==轮次文本）。
-- **测试**：空轮次、CJK、超长单轮。
+- **Acceptance**: Document passes through untouched; Transcript preserves time/session markers; spans are invertible (slice == turn text).
+- **Tests**: empty turns, CJK, extremely long single turn.
 
-## P1-2 分块器
+## P1-2 Chunker
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：会话对齐 + 窗口兜底 + 哈希。
-- **设计**：
+- **Content**: session alignment + window fallback + hashing.
+- **Design**:
 ```rust
 pub struct ChunkConfig { pub session_gap: Duration, pub max_tokens: usize, pub min_tokens: usize, pub estimator: TokenEstimatorKind }
 pub struct RawChunk { pub index: u32, pub text: String, pub content_hash: String,
                       pub time_start: Option<Timestamp>, pub time_end: Option<Timestamp> }
 pub fn chunk(p: &NormalizedPayload, cfg: &ChunkConfig, est: &dyn TokenEstimator) -> Vec<RawChunk>
-pub fn chunk_hash(text: &str) -> String   // 空白归一 + SHA-256
+pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256
 ```
-- **验收**：确定性（同输入同输出）；不产生空块；超长会话按窗口切且不跨"明显会话边界"。
-- **测试**：多会话、单超长轮、仅空白差异哈希相等。
+- **Acceptance**: deterministic (same input, same output); never emits empty chunks; oversized sessions are window-split without crossing "obvious session boundaries".
+- **Tests**: multiple sessions, one oversized turn, whitespace-only differences hash equal.
 
-## P1-3 `create_source`（tx0）
+## P1-3 `create_source` (tx0)
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：Store 实现 + 事务边界。
-- **验收**：payload_text 落库、status=received；崩溃点前无半写。
-- **测试**：读回一致；重复 external 无意义 ID 均新行。
+- **Content**: Store implementation + transaction boundary.
+- **Acceptance**: payload_text persisted, status=received; no half-writes before the crash point.
+- **Tests**: read-back consistency; duplicated callers each get a new row (no meaningful external id).
 
-## P1-4 `append_chunks`（tx1）
+## P1-4 `append_chunks` (tx1)
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：批量插入 + 冲突跳过 + source 状态推进。
-- **设计**：`INSERT … ON CONFLICT(bank_id,content_hash) DO NOTHING`；同事务 `UPDATE source SET status='chunked'`。
-- **验收**：全冲突时插入 0 行但 source 照常 chunked（零 chunk 账本行）。
-- **测试**：同源重灌两次；跨源相同内容；部分冲突。
+- **Content**: batch insert + conflict skip + source status advance.
+- **Design**: `INSERT … ON CONFLICT(bank_id,content_hash) DO NOTHING`; same transaction `UPDATE source SET status='chunked'`.
+- **Acceptance**: when every chunk conflicts, 0 rows are inserted but the source still becomes chunked (zero-chunk ledger row).
+- **Tests**: same-source double ingest; identical content across sources; partial conflicts.
 
 ## P1-5 `claim_chunk`
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：原子认领 + 过期回收。
-- **设计**：
+- **Content**: atomic claim + stale reclaim.
+- **Design**:
 ```sql
 UPDATE chunk SET status='extracting', updated_at = ?1
 WHERE id = (SELECT id FROM chunk WHERE bank_id=?2 AND status='pending'
             ORDER BY created_at LIMIT 1)
   AND status='pending'
 RETURNING *;
--- 过期回收：UPDATE chunk SET status='pending' WHERE status='extracting' AND updated_at < ?old
+-- stale reclaim: UPDATE chunk SET status='pending' WHERE status='extracting' AND updated_at < ?old
 ```
-- **验收**：双 worker 并发只有一个拿到；过期 extracting 被重置。
-- **测试**：并发 10 任务仅 1 成功；时间回拨后重置。
+- **Acceptance**: with two concurrent workers only one claims; stale extracting rows are reset.
+- **Tests**: 10 concurrent claims, only 1 succeeds; reset after time rewind.
 
 ## P1-6 `release_chunk`
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：失败回 pending。
-- **验收**：status=pending、updated_at 刷新；连续失败不改变语义。
-- **测试**：release 后可再次 claim。
+- **Content**: return to pending on failure.
+- **Acceptance**: status=pending, updated_at refreshed; repeated failures keep the semantics.
+- **Tests**: after release, the chunk can be claimed again.
 
-## P1-7 抽取调用
+## P1-7 Extraction Call
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：A.1 prompt + schema + 解析校验。
-- **设计**：
+- **Content**: A.1 prompt + schema + parse validation.
+- **Design**:
 ```rust
 pub async fn extract_facts(llm:&dyn Llm, chunk:&Chunk, cfg:&ExtractionConfig) -> Result<ExtractionReport>
 pub struct ExtractionReport { pub facts: Vec<ExtractedFact>, pub discarded: usize }
-// prompt: A.1 全文（system），user=chunk.text；schema_name="fact_extraction"
-// 校验：what 非空；fact_type 合法；causal.target_fact_index < facts.len()
+// prompt: full A.1 text (system), user=chunk.text; schema_name="fact_extraction"
+// validation: non-empty what; valid fact_type; causal.target_fact_index < facts.len()
 pub fn validate_extracted(f: &ExtractedFact) -> Result<()>
 ```
-- **验收**：单条不合法丢弃并计数；整调用重试仅对 Retryable。
-- **测试**：FakeLlm 返回 3 条含 1 条坏；空结果；超长文本截断策略。
+- **Acceptance**: invalid single facts are discarded and counted; call-level retry only for Retryable.
+- **Tests**: FakeLlm returns 3 facts with 1 bad; empty result; oversized text truncation policy.
 
-## P1-8 时间与增强文本
+## P1-8 Time and Augmented Text
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：时间归一化 + 人类可读前缀 + 嵌入输入组装。
-- **设计**：
+- **Content**: time normalization + human-readable prefix + embedding-input assembly.
+- **Design**:
 ```rust
 pub fn normalize_time(extracted:&mut ExtractedFact, chunk:&Chunk, clock:&dyn Clock) -> Result<()>
-// 缺失 occurred → 用 chunk.time_start/end；缺失 mentioned_at → chunk 区间中点/创建时刻
+// missing occurred → use chunk.time_start/end; missing mentioned_at → chunk interval midpoint / creation time
 pub fn human_readable(ts: Timestamp) -> String            // "Saturday, June 9, 2024"
 pub fn embedding_input(text:&str, ts: Option<Timestamp>) -> String  // "{human}. {text}"
 ```
-- **验收**：无时间信息时不伪造（None 保持 None）；存库文本 == 嵌入输入（同一字符串）。
-- **测试**：相对时间已由 LLM 归一（本步只做缺省补全）；前缀格式。
+- **Acceptance**: never fabricate time (None stays None); stored text == embedding input (the same string).
+- **Tests**: relative times are already normalized by the LLM (this step only fills defaults); prefix format.
 
-## P1-9 实体消解 ρ
+## P1-9 Entity Resolution ρ
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：精确命中 → 三特征模糊 → ensure_entity。
-- **设计**：
+- **Content**: exact hit → three-feature fuzzy match → ensure_entity.
+- **Design**:
 ```rust
 pub struct ResolveWeights { pub alpha: f32, pub beta: f32, pub gamma: f32, pub threshold: f32 }
 pub struct MentionContext { pub co_mentioned: Vec<EntityId>, pub at: Option<Timestamp> }
 pub async fn resolve(store:&dyn Store, bank:BankId, mention:&EntityMention,
                      ctx:&MentionContext, w:&ResolveWeights) -> Result<EntityId>
-pub fn normalize_name(s:&str)->String                    // lowercase/trim/空白折叠
-pub fn string_sim(a:&str,b:&str)->f32                    // 归一化 Levenshtein 相似
+pub fn normalize_name(s:&str)->String                    // lowercase/trim/whitespace collapse
+pub fn string_sim(a:&str,b:&str)->f32                    // normalized Levenshtein similarity
 pub fn cooccurrence_sim(cand:&EntityCandidate, ctx:&MentionContext)->f32
 pub fn temporal_sim(cand:&EntityCandidate, at: Option<Timestamp>)->f32
 ```
-- **验收**：同 mention 永远解析到同一实体；冲突创建用 `ensure_entity` 的 UNIQUE 兜底。
-- **测试**：精确/变体/新实体三路；并发建同名实体只产生一行；空 mention 拒绝。
+- **Acceptance**: the same mention always resolves to the same entity; creation conflicts fall back to `ensure_entity`'s UNIQUE.
+- **Tests**: exact/variant/new-entity paths; concurrent creation of the same name yields one row; empty mention rejected.
 
-## P1-10 实体统计
+## P1-10 Entity Statistics
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：commit 内应用 `EntityStatUpdate`。
-- **设计**：`mention_count += 1`；`first_seen = min`；`last_seen = max`（对话时钟）。
-- **验收**：与绑定行数一致（测试断言 COUNT）。
-- **测试**：新增/重抽替换（-1/+1）；NULL 时间不更新 seen。
+- **Content**: apply `EntityStatUpdate` inside the commit.
+- **Design**: `mention_count += 1`; `first_seen = min`; `last_seen = max` (conversation clock).
+- **Acceptance**: consistent with the binding-row count (tests assert COUNT).
+- **Tests**: insert/re-extraction replace (−1/+1); NULL time does not update seen.
 
-## P1-11 嵌入生成
+## P1-11 Embedding Generation
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：批量嵌入 + 维度校验 + 失败降级。
-- **设计**：`pub async fn embed_facts(emb:&dyn Embedder, texts:&[String], batch:usize) -> Vec<Option<Vec<f32>>>`；校验 `len==dim()`；失败记 None（运行时回填）。
-- **验收**：维度不一致直接 Config 错；失败不阻塞 tx2。
-- **测试**：批次切分；单批失败 → None 行。
+- **Content**: batch embedding + dimension validation + failure degradation.
+- **Design**: `pub async fn embed_facts(emb:&dyn Embedder, texts:&[String], batch:usize) -> Vec<Option<Vec<f32>>>`; validate `len==dim()`; failure becomes None (runtime backfill).
+- **Acceptance**: dimension mismatch is a Config error; failure does not block tx2.
+- **Tests**: batch splitting; single-batch failure → None rows.
 
-## P1-12 temporal 建链
+## P1-12 Temporal Link Construction
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：区间邻近 → 双行。
-- **设计**：
+- **Content**: interval proximity → two rows.
+- **Design**:
 ```rust
 pub fn temporal_weight(gap: Duration, sigma: Duration) -> f32   // exp(-gap/sigma)
 pub async fn build_temporal_links(store:&dyn Store, bank:BankId, new_facts:&[Fact],
                                   cfg:&LinkConfig) -> Result<Vec<NewLink>>
-// 候选：与新区间距离 < 窗口；按权重排序取前 K 对；每对写 from→to 与 to→from
+// candidates: interval distance < window; sort by weight and keep the top-K pairs; write from→to and to→from per pair
 ```
-- **验收**：双行成对（规范键计数恒 2）；按对裁剪不留单侧；无时间行不建边。
-- **测试**：三事实时间窗；裁剪边界；权重公式单测。
+- **Acceptance**: reciprocal pairs always complete (canonical-key count is 2); pruning leaves no one-sided rows; rows without time create no edges.
+- **Tests**: three-fact time window; pruning boundaries; weight formula unit test.
 
-## P1-13 semantic 建链
+## P1-13 Semantic Link Construction
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：有向 top-k。
-- **设计**：`pub async fn build_semantic_links(store, bank, new_facts, cfg) -> Result<Vec<NewLink>>`；对每个新 fact：`search_vector`（排除自身、cos≥θs）取 top-K，每条 `from=new, to=cand, weight=cos`。
-- **验收**：单行有向；不建 B→A（除非 B 也选 A）；预算内。
-- **测试**：预算 2 时同分布断言；自身排除；θs 过滤。
+- **Content**: directed top-k.
+- **Design**: `pub async fn build_semantic_links(store, bank, new_facts, cfg) -> Result<Vec<NewLink>>`; for each new fact: `search_vector` (exclude self, cos≥θs), take top-K; each edge `from=new, to=cand, weight=cos`.
+- **Acceptance**: directed single rows; no B→A unless B also selects A; within budget.
+- **Tests**: deterministic distribution with budget 2; self excluded; θs filtering.
 
-## P1-14 causal 建链
+## P1-14 Causal Link Construction
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：抽取输出映射。
-- **设计**：`pub fn causal_links(extracted:&[ExtractedFact], ids:&[FactId]) -> Vec<NewLink>`；`target_fact_index → ids[i]`；单行。归一化按拍板结果（当前：原样 + relation）。
-- **验收**：越界索引丢弃；重复对去重；强度不入权重（论文 w=1.0）。
-- **测试**：两事实单向因果；链式因果；越界。
+- **Content**: map extraction output.
+- **Design**: `pub fn causal_links(extracted:&[ExtractedFact], ids:&[FactId]) -> Vec<NewLink>`; `target_fact_index → ids[i]`; single row. Normalization per the decision (currently: keep as-is + relation).
+- **Acceptance**: out-of-range indices dropped; duplicate pairs deduplicated; strength does not enter weight (paper w=1.0).
+- **Tests**: one-way causality between two facts; chained causality; out-of-range.
 
-## P1-15 意见强化
+## P1-15 Opinion Reinforcement
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：候选 → Assess → 置信度更新。
-- **设计**：
+- **Content**: candidates → Assess → confidence update.
+- **Design**:
 ```rust
 pub struct ReinforcementConfig { pub alpha: f32, pub sim_threshold: f32, pub max_candidates: usize }
 pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
                        new_facts:&[Fact], cfg:&ReinforcementConfig)
   -> Result<Vec<OpinionConfidenceUpdate>>
-// 候选：实体重叠 ∪ sim(v_o,v_f)>θ（search_vector 限 opinion）
-// Assess schema：{"verdict":"reinforce|weaken|contradict|neutral","reason":"…"}
+// candidates: entity overlap ∪ sim(v_o,v_f)>θ (search_vector restricted to opinions)
+// Assess schema: {"verdict":"reinforce|weaken|contradict|neutral","reason":"…"}
 // c' = min(c+α,1) / max(c-α,0) / max(c-2α,0) / c
 ```
-- **验收**：四档规则单测；neutral 不产生更新；contradict 可选改文本；全部随 tx2 原子。
-- **测试**：FakeLlm 四 verdict；实体重叠/向量召回两路候选；α 边界(0/1)。
+- **Acceptance**: four-verdict rules unit-tested; neutral produces no update; contradict may rewrite text; everything is atomic with tx2.
+- **Tests**: FakeLlm four verdicts; both candidate paths (entity overlap / vector recall); α boundaries (0/1).
 
-## P1-16 `commit_chunk`（tx2）
+## P1-16 `commit_chunk` (tx2)
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：单事务落全部产物。
-- **设计**：顺序 insert entity→fact→fact_entity→fact_link→FTS→stat updates→opinion updates→chunk.status=done；任一失败回滚。
-- **验收**：失败后无任何残留行；成功后可观察到 fact/边/统计一致。
-- **测试**：注入失败（如 FTS 唯一冲突）验证全回滚；重放同一 commit 幂等（status 已 done 时拒绝）。
+- **Content**: commit every product in one transaction.
+- **Design**: insert order entity→fact→fact_entity→fact_link→FTS→stat updates→opinion updates→chunk.status=done; any failure rolls back.
+- **Acceptance**: no residual rows after failure; after success, facts/edges/statistics are consistent.
+- **Tests**: inject failure (e.g. FTS unique conflict) and verify full rollback; replaying the same commit is rejected (status already done).
 
-## P1-17 retain API（同步语义）
+## P1-17 retain API (Synchronous Semantics)
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：facade 方法。
-- **设计**：
+- **Content**: facade method.
+- **Design**:
 ```rust
-pub struct RetainOptions { pub wait_until_done: bool }   // v1 恒 true
+pub struct RetainOptions { pub wait_until_done: bool }   // v1 always true
 pub struct RetainReport { pub source_id: SourceId, pub chunks_total: usize,
                           pub chunks_skipped: usize, pub facts_written: usize }
 impl MemoryBank { pub async fn retain(&self, bank:BankId, payload:RawPayload, opts:RetainOptions) -> Result<RetainReport> }
 ```
-- **验收**：返回时本次 chunks 全部 done（或被跳过）；错误分类传播（Retryable 包装 context）。
-- **测试**：端到端（fake LLM/embedder）产出事实数正确。
+- **Acceptance**: on return, this call's chunks are all done (or skipped); error classes propagated with context.
+- **Tests**: end-to-end (fake LLM/embedder) produces the expected fact count.
 
 ## P1-18 worker + rescan
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：派生 work list 驱动。
-- **设计**：
+- **Content**: driven by derived work lists.
+- **Design**:
 ```rust
 pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usize, pub failed: usize }
 impl MemoryBank { pub async fn rescan(&self, bank:BankId) -> Result<RescanReport>;
                   pub fn spawn_worker(&self, cfg:WorkerConfig) -> JoinHandle<()>; }
 ```
-- **验收**：status=received 补分块；pending/过期 extracting 重跑；failed 不自动重试（运维重置）。
-- **测试**：中断模拟（手工置 status）后 rescan 收敛。
+- **Acceptance**: status=received sources are re-chunked; pending/stale-extracting chunks are re-run; failed is not retried automatically (ops reset).
+- **Tests**: simulate interruption (manually set status), then rescan converges.
 
-## P1-19 retain 集成测试
+## P1-19 retain Integration Tests
 
-**状态**：❌
+**Status**: ❌
 
-- **内容**：端到端矩阵。
-- **验收/测试**：
-  - 重灌幂等（零新 facts）；增量重灌（只处理新 chunks）；
-  - 抽集中断 → rescan 恢复；tx2 失败 → 无半成品；
-  - 双行不变量（SQL 断言计数=2）；实体统计与绑定一致。
+- **Content**: end-to-end matrix.
+- **Acceptance/Tests**:
+  - re-ingest idempotency (zero new facts); incremental re-ingest (only new chunks processed);
+  - interrupted extraction → rescan recovers; tx2 failure → no partial state;
+  - two-row invariant (SQL asserts count=2); entity statistics match bindings.
 
 ---
 
 # P2 · recall
 
-## P2-1 语义通道
+## P2-1 Semantic Channel
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`search_vector` 实现：`SELECT id, embedding FROM fact WHERE bank_id=? AND embedding IS NOT NULL`，Rust 内余弦，维护 top-k 最小堆；`k`/`min_cos` 配置。
-- **验收**：与暴力参考实现一致；NULL 跳过。
-- **测试**：已知向量集排序断言；空库返回空。
+- **Design**: implement `search_vector`: `SELECT id, embedding FROM fact WHERE bank_id=? AND embedding IS NOT NULL`, cosine in Rust, maintain a top-k min-heap; `k`/`min_cos` from configuration.
+- **Acceptance**: matches the brute-force reference implementation; NULL rows skipped.
+- **Tests**: ordering assertions on a known vector set; empty bank returns empty.
 
-## P2-2 BM25 通道
+## P2-2 BM25 Channel
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`search_bm25`：查询词按空白/标点切分并转义（`"term"` 引号包裹），`SELECT fact_id, bm25(fact_fts) AS s … JOIN fact ON … WHERE bank_id=? ORDER BY s LIMIT k`。
-- **验收**：中文 trigram 可命中子串；空查询返回空。
-- **测试**：专名/数字命中；注入式特殊字符不报错。
+- **Design**: `search_bm25`: split the query on whitespace/punctuation and escape terms (wrap in `"term"` quotes), `SELECT fact_id, bm25(fact_fts) AS s … JOIN fact ON … WHERE bank_id=? ORDER BY s LIMIT k`.
+- **Acceptance**: CJK trigram substrings match; empty query returns empty.
+- **Tests**: proper nouns/numbers match; injection-style special characters do not error.
 
-## P2-3 图通道（扩散激活）
+## P2-3 Graph Channel (Spreading Activation)
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：
+- **Design**:
 ```rust
 pub struct GraphConfig { pub delta: f32, pub mu_temporal/mu_semantic/mu_entity/mu_causal: f32,
                          pub max_depth: u8, pub max_visits: usize }
 pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)], cfg:&GraphConfig)
   -> Result<Vec<(FactId,f32)>>   // A(fj)=max(A(fi)*w*delta*mu(ℓ))
 ```
-- **验收**：深度/访问上限生效；确定性（同输入同序）。
-- **测试**：链式图激活衰减；环不无限；实体虚拟邻接参与。
+- **Acceptance**: depth/visit caps enforced; deterministic (same input, same order).
+- **Tests**: chained-graph activation decay; cycles terminate; derived entity adjacency participates.
 
-## P2-4 时间通道
+## P2-4 Temporal Channel
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`TemporalParser.parse` → `facts_in_range` → 邻近分 `1 - |midDiff|/(range/2)`。
-- **验收**：无时间约束时不触发；区间端点闭开语义固定（闭区间）。
-- **测试**：查询"上周"；无结果；跨零时区统一 UTC。
+- **Design**: `TemporalParser.parse` → `facts_in_range` → proximity score `1 - |midDiff|/(range/2)`.
+- **Acceptance**: no time constraint means no activation; interval endpoint semantics fixed (closed interval).
+- **Tests**: "last week" query; no results; timezone normalization to UTC.
 
 ## P2-5 RRF
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`pub fn rrf(lists:&[Vec<FactId>], k:u32)->Vec<(FactId,f32)>`；并集、稳定排序（score desc, id asc）。
-- **验收**：单列表=原序；缺失列表贡献 0。
-- **测试**：两列表交叉；平分稳定性。
+- **Design**: `pub fn rrf(lists:&[Vec<FactId>], k:u32)->Vec<(FactId,f32)>`; union, stable sort (score desc, id asc).
+- **Acceptance**: a single list preserves its order; a missing list contributes 0.
+- **Tests**: two crossing lists; tie-breaking stability.
 
-## P2-6 rerank 接入
+## P2-6 Rerank Integration
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`pub async fn rerank_top(reranker:&dyn Reranker, query:&str, facts:&[Fact], top_n:usize)`；出错回退原序并记录。
-- **验收**：只重排 top-N；其余保持。
-- **测试**：Identity 保持；反转 fake 生效。
+- **Design**: `pub async fn rerank_top(reranker:&dyn Reranker, query:&str, facts:&[Fact], top_n:usize)`; on error fall back to the original order and log.
+- **Acceptance**: only top-N reordered; the rest unchanged.
+- **Tests**: Identity preserves; reversing fake takes effect.
 
-## P2-7 预算打包
+## P2-7 Budget Packing
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：
+- **Design**:
 ```rust
 pub trait TokenEstimator { fn estimate(&self, text:&str)->usize }
-pub struct CharHeuristic;      // ceil(chars * ratio) 可配
+pub struct CharHeuristic;      // ceil(chars * ratio), configurable
 pub fn pack(facts:&[(Fact,f32)], budget:usize, est:&dyn TokenEstimator) -> (Vec<Fact>, usize)
 ```
-- **验收**：累计 ≤ budget；超界即停；首条超预算时固定返回空并告警。
-- **测试**：边界 budget=0/恰好等于/差1。
+- **Acceptance**: cumulative ≤ budget; stops on overflow; if the first fact alone exceeds the budget, return empty and warn (fixed behavior).
+- **Tests**: boundary cases budget=0 / exactly equal / one short.
 
-## P2-8 召回产物与 access_count
+## P2-8 Recall Products and access_count
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：
+- **Design**:
 ```rust
 pub struct RecalledFact { pub fact: Fact, pub score: f32, pub channels: Vec<(Channel, u32 /*rank*/)> }
 pub struct RecallResult { pub facts: Vec<RecalledFact>, pub tokens_used: usize }
 ```
-- **验收**：channels 标注重合；`increment_access` 批量执行。
-- **测试**：多通道命中标注。
+- **Acceptance**: channels mark overlaps; `increment_access` is batched.
+- **Tests**: multi-channel hit annotation.
 
-## P2-9 recall API
+## P2-9 Recall API
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：
+- **Design**:
 ```rust
 pub struct RecallOptions { pub token_budget: usize, pub channels: ChannelMask,
                            pub time_range: Option<TimeRange>, pub rerank_top_n: usize, pub per_channel_k: usize }
 impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:RecallOptions) -> Result<RecallResult> }
 ```
-- **验收**：四通道可独立关闭；query 嵌入仅一次；总耗时打点。
-- **测试**：固定语料 10 问的命中断言（fake embedder 语义可构造）。
+- **Acceptance**: each of the four channels can be disabled independently; the query is embedded only once; total latency instrumented.
+- **Tests**: hit assertions for 10 questions on a fixed corpus (fake embedder semantics can be constructed).
 
-## P2-10 性能基线
+## P2-10 Performance Baseline
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`benches/`（criterion）或 example 计时；记录 1k/10k 暴力余弦耗时。
-- **验收**：数据入库 `design/` 备查（不设硬阈值）。
-- **测试**：基准可运行（CI 不跑）。
+- **Design**: `benches/` (criterion) or example timing; record brute-force cosine latency at 1k/10k facts.
+- **Acceptance**: numbers recorded under `design/` for reference (no hard threshold).
+- **Tests**: benchmarks runnable (CI skips them).
 
 ---
 
 # P3 · reflect
 
-## P3-1 φ(Θ) 口头化
+## P3-1 φ(Θ) Verbalization
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`pub fn verbalize(p:&BankProfile)->String`；S/L/E 各 5 档文案 + β 三档修饰（0/0.5/1 规则）。
-- **验收**：同画像输出稳定；β=0 时弱化偏好措辞。
-- **测试**：极值组合快照。
+- **Design**: `pub fn verbalize(p:&BankProfile)->String`; 5 levels each for S/L/E + β modulation in three bands (0/0.5/1 rules).
+- **Acceptance**: stable output for the same profile; β=0 softens preference wording.
+- **Tests**: snapshot for extreme combinations.
 
-## P3-2 system message 组装
+## P3-2 System Message Assembly
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`pub fn system_message(bank:&Bank, evidence:&[RecalledFact])->String`（姓名/背景/φ/证据编号块）。
-- **验收**：证据按编号可引用；无证据时显式"无相关记忆"。
-- **测试**：快照；超长证据截断策略。
+- **Design**: `pub fn system_message(bank:&Bank, evidence:&[RecalledFact])->String` (name/background/φ/numbered evidence block).
+- **Acceptance**: evidence is referenceable by number; with no evidence, explicitly states "no relevant memories".
+- **Tests**: snapshot; oversized-evidence truncation policy.
 
-## P3-3 回答 + 意见抽取
+## P3-3 Answer + Opinion Extraction
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`pub async fn reflect_llm(llm:&dyn Llm, sys:String, user:String)->Result<ReflectResponse>`（schema `reflect`）。
-- **验收**：意见 confidence ∈[0,1]；空 opinions 合法。
-- **测试**：FakeLlm 返回含 2 条意见。
+- **Design**: `pub async fn reflect_llm(llm:&dyn Llm, sys:String, user:String)->Result<ReflectResponse>` (schema `reflect`).
+- **Acceptance**: opinion confidence ∈[0,1]; empty opinions are valid.
+- **Tests**: FakeLlm returns two opinions.
 
-## P3-4 意见落库
+## P3-4 Opinion Persistence
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`NewOpinion { id, bank_id, text, confidence, entities: Vec<(EntityId, Option<String>)>, embedding }`；实体绑定：`bind_known_entities(store, bank, text)`（对 canonical_name/变体做精确/子串匹配，不调 LLM）。
-- **验收**：chunk_id=None；confidence 必填；嵌入写入。
-- **测试**：绑定 0/2 实体；文本含多个已知实体。
+- **Design**: `NewOpinion { id, bank_id, text, confidence, entities: Vec<(EntityId, Option<String>)>, embedding }`; entity binding via `bind_known_entities(store, bank, text)` (exact/substring matching against canonical names/variants, no LLM calls).
+- **Acceptance**: chunk_id=None; confidence required; embedding written.
+- **Tests**: 0/2 entities bound; text containing multiple known entities.
 
-## P3-5 强化复用
+## P3-5 Reinforcement Reuse
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：reflect 后对新意见与既有意见调用同一 `reinforce()` 入口。
-- **验收**：无逻辑分叉（同一实现）。
-- **测试**：P1-15 用例复用。
+- **Design**: after reflect, call the same `reinforce()` entry point for new and existing opinions.
+- **Acceptance**: no logic fork (one implementation).
+- **Tests**: reuse the P1-15 cases.
 
-## P3-6 证据透传
+## P3-6 Evidence Passthrough
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`ReflectResult { answer, opinions_formed: Vec<FactId>, recalled: RecallResult }`。
-- **验收**：回答与证据 id 绑定关系可外查（不解析文本）。
-- **测试**：返回结构断言。
+- **Design**: `ReflectResult { answer, opinions_formed: Vec<FactId>, recalled: RecallResult }`.
+- **Acceptance**: the answer↔evidence id relationship is externally inspectable (no text parsing).
+- **Tests**: return-structure assertions.
 
-## P3-7 行为测试
+## P3-7 Behavior Tests
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：FakeLlm 记录请求；断言高/低怀疑度画像的 system prompt 差异与 β 调制。
-- **验收**：prompt 断言稳定（快照）。
-- **测试**：两组画像对比。
+- **Design**: FakeLlm records requests; assert system-prompt differences between high/low-skepticism profiles and β modulation.
+- **Acceptance**: prompt assertions stable (snapshots).
+- **Tests**: compare two profiles.
 
 ## P3-8 reflect API
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`impl MemoryBank { pub async fn reflect(&self, bank, query, opts:ReflectOptions)->Result<ReflectResult> }`（内部 recall + LLM + 落库）。
-- **验收**：端到端跑通；失败可重试（意见 id 预生成 + 单事务插入，避免重复）。
-- **测试**：集成（fake）。
+- **Design**: `impl MemoryBank { pub async fn reflect(&self, bank, query, opts:ReflectOptions)->Result<ReflectResult> }` (internally recall + LLM + persistence).
+- **Acceptance**: end-to-end runs; failures retryable (pre-generated opinion ids + single-transaction insert prevent duplicates).
+- **Tests**: integration (fake).
 
 ---
 
-# P4 · observe 与打磨
+# P4 · observe and polish
 
-## P4-1 观察合成调用
+## P4-1 Observation Synthesis Call
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`pub async fn synthesize_observations(llm, entity, facts, cfg) -> Result<Vec<ObservationDraft>>`（A.3，3–7 条，客观第三人称）。
-- **验收**：条数范围；空事实集不调用。
-- **测试**：FakeLlm 条数/内容校验。
+- **Design**: `pub async fn synthesize_observations(llm, entity, facts, cfg) -> Result<Vec<ObservationDraft>>` (A.3, 3–7 items, objective third person).
+- **Acceptance**: count range enforced; no call for an empty fact set.
+- **Tests**: FakeLlm count/content validation.
 
-## P4-2 证据变更 work list
+## P4-2 Evidence-Change Work List
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`pending_work.entities_stale_observation`：`entity.last_seen > max(observation.created_at bound to entity)`（SQL 聚合 + 索引）。
-- **验收**：新证据触发；无变更不重复触发；上限参数。
-- **测试**：新增事实→实体入列；再合成后出列。
+- **Design**: `pending_work.entities_stale_observation`: `entity.last_seen > max(observation.created_at bound to entity)` (SQL aggregation + index).
+- **Acceptance**: new evidence triggers; no change means no repeat trigger; capped by parameter.
+- **Tests**: new fact → entity enters the list; after synthesis it leaves.
 
-## P4-3 追加式插入
+## P4-3 Append-Only Insert
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`NewObservation { fact_id, bank_id, text, embedding, entity_ids, created_at }`；一次事务插入行 + 全量绑定 + FTS。
-- **验收**：多实体绑定；无 chunk_id；旧批不删。
-- **测试**：重复合成产生新行（非替换）。
+- **Design**: `NewObservation { fact_id, bank_id, text, embedding, entity_ids, created_at }`; one transaction inserts rows + full bindings + FTS.
+- **Acceptance**: multi-entity bindings; no chunk_id; old batches not deleted.
+- **Tests**: repeated synthesis creates new rows (not replacements).
 
-## P4-4 观察取用
+## P4-4 Observation Retrieval
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`observations_of` 按 `created_at DESC LIMIT n`；facade 暴露 `entity_profile(bank, entity, limit)`。
-- **验收**：新近度优先；与 recall 自然检索并存。
-- **测试**：两批观察的顺序断言。
+- **Design**: `observations_of` ordered by `created_at DESC LIMIT n`; facade exposes `entity_profile(bank, entity, limit)`.
+- **Acceptance**: recency preferred; coexists with natural recall retrieval.
+- **Tests**: ordering assertions across two batches.
 
 ## P4-5 GC
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`gc_observations(bank, max_age, per_entity_cap)`：先删超龄，再按实体绑定计数保留最新 cap 条；同事务。
-- **验收**：不影响非 observation 行；幂等。
-- **测试**：龄/计数两种裁剪；共享实体行被多实体计数。
+- **Design**: `gc_observations(bank, max_age, per_entity_cap)`: delete by age first, then keep the newest `cap` rows per entity binding; same transaction.
+- **Acceptance**: non-observation rows unaffected; idempotent.
+- **Tests**: age-based and count-based pruning; shared entity rows counted by multiple entities.
 
 ## P4-6 sweeper
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：`spawn_sweeper(cfg)`：周期执行 rescan + 观察合成队列 + 嵌入回填 + GC；去抖（同实体在跑跳过）；jitter。
-- **验收**：崩溃后重启自动收敛；不重复合成同批。
-- **测试**：两轮 sweep 后工作清空。
+- **Design**: `spawn_sweeper(cfg)`: periodically run rescan + observation synthesis queue + embedding backfill + GC; dedupe (skip an entity already in flight); jitter.
+- **Acceptance**: after a crash and restart it converges automatically; no duplicate synthesis of the same batch.
+- **Tests**: after two sweeps, work is empty.
 
-## P4-7 质量打磨
+## P4-7 Quality Polish
 
-**状态**：❌
+**Status**: ❌
 
-- **设计**：消解阈值/共现权重、建链剪枝、分块参数全部配置化；加数据驱动的调参脚本（examples）。
-- **验收**：配置变更无需改代码。
-- **测试**：配置快照/默认值。
+- **Design**: resolution thresholds/co-occurrence weights, link pruning, and chunking parameters all configurable; add data-driven tuning scripts (examples).
+- **Acceptance**: configuration changes require no code changes.
+- **Tests**: config snapshots/defaults.
 
-## P4-8 P4 集成测试
+## P4-8 P4 Integration Tests
 
-**状态**：❌
+**Status**: ❌
 
-- **测试**：观察追加/回收、GC 与 recall 交互、实体画像 API。
-
----
-
-# P5 · 适配器与评测
-
-## P5-1 PG migration + 适配器
-
-**状态**：❌
-
-- **设计**：独立 `postgres` module（sqlx::Postgres），类型映射 jsonb/timestamptz；`vector` 类型可选 feature；SQL 方言差异隔离在 module 内。
-- **验收**：同一 trait 双实现；契约测试通过。
-- **测试**：testcontainers 或本地 PG（CI 可选）。
-
-## P5-2 Store 契约测试双跑
-
-**状态**：❌
-
-- **设计**：`store::testing::contract(factory: impl BackendFactory)`，覆盖方法语义（认领原子性、冲突跳过、邻接合并、统计维护）。
-- **验收**：两后端全绿。
-- **测试**：契约套件本身。
-
-## P5-3 真 reranker
-
-**状态**：❌
-
-- **设计**：`llm::HttpReranker { endpoint, model, timeout }`；批量文档打分；失败回退原序。
-- **验收**：与 stub 可互换。
-- **测试**：mock HTTP（wiremock）。
-
-## P5-4 真 TemporalParser
-
-**状态**：❌
-
-- **设计**：规则库（多语言日期/相对表达）+ 可选 t5-small 兜底（HTTP/ONNX 二选一）。
-- **验收**：常见表达解析率；无法解析返回 None。
-- **测试**：日期语料表驱动。
-
-## P5-5 并发与配置化收口
-
-**状态**：❌
-
-- **设计**：worker 并发、批次、超时/重试、日志采样全部配置；tracing spans（bank/chunk/fact）。
-- **验收**：压测下无锁争用热点；重试指标可见。
-- **测试**：配置组合冒烟。
-
-## P5-6 LongMemEval harness
-
-**状态**：❌
-
-- **设计**：数据加载 → 按 session retain → 逐问 recall+reflect → LLM-as-judge（论文 A.4 prompt）→ 指标汇总。
-- **验收**：可复现跑通（fake 模式先验证管线）。
-- **测试**：小样本 golden。
-
-## P5-7 LoCoMo harness
-
-**状态**：❌
-
-- **设计**：多会话对话 + 图像字段忽略策略 → 同 P5-6。
-- **验收**：指标输出格式统一。
-- **测试**：小样本。
-
-## P5-8 文档与示例
-
-**状态**：❌
-
-- **设计**：README 快速开始；examples：`retain_basic`、`recall_query`、`reflect_with_profile`、`custom_store`（展示 port 可替换）。
-- **验收**：`cargo run --example` 可跑（fake 模式无 API key）。
-- **测试**：examples 编译 + 冒烟。
+- **Tests**: observation append/reclaim, GC × recall interaction, entity profile API.
 
 ---
 
-# 交付节奏说明
+# P5 · adapters and evaluation
 
-- 每步一提交，提交信息 `P<阶段>-<序号>: <任务>`；
-- P0/P1 是主干，建议**逐任务评审后合并**；P2 起可两条线并行（检索/意见）；
-- 每阶段末跑：`cargo test --workspace` + 阶段集成测试 + clippy/fmt；
-- 未决语义在对应任务开工前拍板：§7.A#2（confidence）、causal 归一化/relation 收窄、Store 是否拆分、token 估算器实现。
+## P5-1 PG Migration + Adapter
+
+**Status**: ❌
+
+- **Design**: a separate `postgres` module (sqlx::Postgres), jsonb/timestamptz mapping; `vector` type as an optional feature; dialect differences isolated in the module.
+- **Acceptance**: two implementations of the same trait; contract tests pass.
+- **Tests**: testcontainers or a local PG (optional in CI).
+
+## P5-2 Dual-Backend Store Contract Tests
+
+**Status**: ❌
+
+- **Design**: `store::testing::contract(factory: impl BackendFactory)`, covering method semantics (claim atomicity, conflict skip, adjacency merging, statistics maintenance).
+- **Acceptance**: both backends green.
+- **Tests**: the contract suite itself.
+
+## P5-3 Real Reranker
+
+**Status**: ❌
+
+- **Design**: `llm::HttpReranker { endpoint, model, timeout }`; batch document scoring; fall back to original order on failure.
+- **Acceptance**: interchangeable with the stub.
+- **Tests**: mock HTTP (wiremock).
+
+## P5-4 Real TemporalParser
+
+**Status**: ❌
+
+- **Design**: rule library (multilingual dates/relative expressions) + optional t5-small fallback (HTTP or ONNX).
+- **Acceptance**: parse rate on common expressions; unparseable returns None.
+- **Tests**: table-driven date corpus.
+
+## P5-5 Concurrency and Configuration Cleanup
+
+**Status**: ❌
+
+- **Design**: worker concurrency, batch sizes, timeouts/retries, and log sampling all configurable; tracing spans (bank/chunk/fact).
+- **Acceptance**: no lock-contention hotspots under load; retry metrics visible.
+- **Tests**: config-combination smoke tests.
+
+## P5-6 LongMemEval Harness
+
+**Status**: ❌
+
+- **Design**: load data → retain per session → per-question recall+reflect → LLM-as-judge (paper A.4 prompts) → metric aggregation.
+- **Acceptance**: reproducible run (fake mode validates the pipeline first).
+- **Tests**: small-sample golden.
+
+## P5-7 LoCoMo Harness
+
+**Status**: ❌
+
+- **Design**: multi-session dialogues + image-field ignoring policy → same as P5-6.
+- **Acceptance**: unified metric output format.
+- **Tests**: small sample.
+
+## P5-8 Documentation and Examples
+
+**Status**: ❌
+
+- **Design**: README quick start; examples: `retain_basic`, `recall_query`, `reflect_with_profile`, `custom_store` (demonstrating port replacement).
+- **Acceptance**: `cargo run --example` works (fake mode, no API key).
+- **Tests**: examples compile + smoke run.
+
+---
+
+# Delivery Notes
+
+- One commit per step; commit message `P<phase>-<index>: <task>`;
+- P0/P1 are the mainline and should be **reviewed per task before merging**; from P2 onward, retrieval and reflection can proceed in parallel;
+- End of each phase: `cargo test --workspace` + phase integration tests + clippy/fmt;
+- Settle open semantics before starting the relevant task: §7.A#2 (confidence), causal normalization/relation narrowing, whether to split the Store trait, token-estimator implementation.

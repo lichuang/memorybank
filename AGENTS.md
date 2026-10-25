@@ -55,7 +55,7 @@ cargo doc --workspace --no-deps
 1. **One task at a time**, taken from `design/phase.md` in phase order (P0 first).
 2. Read the task's Content / Design / Acceptance / Tests sections first. If the design must change, update the design docs **before** the code (see §6).
 3. When done:
-   - change that task's `**状态**：❌` to `**状态**：✅` (add a date or commit hash if useful);
+   - change that task's `**Status**: ❌` to `**Status**: ✅` (add a date or commit hash if useful);
    - update the phase progress counters at the top of `design/phase.md`.
 4. Commit message format: `P<phase>-<index>: <task name>`, e.g. `P0-2: id and time primitives`.
 5. Every task ships with tests; run phase-level integration tests plus `fmt` / `clippy` at the end of each phase.
