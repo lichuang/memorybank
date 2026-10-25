@@ -21,6 +21,9 @@ use thiserror::Error;
 
 use crate::types::ProfileError;
 
+/// Convenience alias for results returned by engine APIs.
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
 /// The engine-wide error type.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum Error {

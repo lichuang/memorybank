@@ -5,6 +5,7 @@ pub mod id;
 pub mod profile;
 pub mod rows;
 pub mod structured;
+pub mod time;
 
 pub use enums::{CausalRelation, ChunkStatus, EntityKind, FactType, LinkType, SourceStatus};
 pub use id::{BankId, ChunkId, EntityId, FactId, IdParseError, LinkId, SourceId};
@@ -14,6 +15,4 @@ pub use structured::{
   Assessment, AssessmentVerdict, CausalRef, EntityMention, ExtractedFact, FactExtractionResponse,
   ObservationDraft, ObservationResponse, OpinionDraft, ReflectResponse,
 };
-
-/// A UTC timestamp. All wall-clock values in the system are UTC.
-pub type Timestamp = chrono::DateTime<chrono::Utc>;
+pub use time::{TimeRange, Timestamp};

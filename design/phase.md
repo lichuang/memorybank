@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 5/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (5/65 total)**
+> Current progress: **P0 6/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (6/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -114,7 +114,7 @@ pub struct ObservationResponse { pub observations: Vec<ObservationDraft> }
 
 ## P0-6 Model Ports
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
 - **Content**: `Llm/Embedder/Reranker/TemporalParser/Clock`.
 - **Design**:
@@ -122,18 +122,23 @@ pub struct ObservationResponse { pub observations: Vec<ObservationDraft> }
 pub struct JsonRequest { pub system: Option<String>, pub user: String,
   pub schema_name: &'static str, pub schema: serde_json::Value,
   pub temperature: f32, pub max_tokens: u32 }
-#[async_trait] pub trait Llm: Send+Sync {
-  async fn complete_json<T: DeserializeOwned>(&self, req: JsonRequest)->Result<T>;
-  fn model(&self)->&str;
+#[async_trait] pub trait Llm: Send+Sync {                                  // dyn-safe
+  async fn complete_json_raw(&self, req: JsonRequest) -> Result<serde_json::Value>;
+  fn model(&self) -> &str;
 }
+#[async_trait] pub trait LlmExt: Llm {                                     // generic convenience layer
+  async fn complete_json<T: DeserializeOwned>(&self, req: JsonRequest) -> Result<T>;
+}
+#[async_trait] impl<T: Llm + ?Sized> LlmExt for T { ... }                  // blanket: `dyn Llm` included
 #[async_trait] pub trait Embedder: Send+Sync { fn model(&self)->&str; fn dim(&self)->usize;
   async fn embed(&self, texts:&[&str])->Result<Vec<Vec<f32>>>; }
 #[async_trait] pub trait Reranker: Send+Sync { async fn rerank(&self, q:&str, docs:&[&str])->Result<Vec<f32>>; }
 pub struct TimeRange { pub start: Timestamp, pub end: Timestamp }
 pub trait TemporalParser: Send+Sync { fn parse(&self, q:&str, now: Timestamp)->Option<TimeRange>; }
 pub trait Clock: Send+Sync { fn now(&self)->Timestamp; }
+pub fn now_ts(clock: &dyn Clock) -> Timestamp            // truncated to millisecond precision
 ```
-- **Acceptance**: `Box<dyn Llm>` works; schema is passed as an argument (no generic schema bound needed).
+- **Acceptance**: `Box<dyn Llm>` compiles and can call both `complete_json_raw` and (via `LlmExt`) `complete_json`; the schema travels as request data (no generic schema bound).
 - **Tests**: empty impl compiles + dyn invocation.
 
 ## P0-7 Store Port (Method Set)

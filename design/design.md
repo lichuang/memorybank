@@ -42,11 +42,23 @@ Dependency direction is fixed at **facade → engine ← adapters**; engine neve
 ```rust
 #[async_trait]
 pub trait Llm: Send + Sync {
-    /// Single entry point: structured output. Extraction (A.1/A.5.1), opinion
+    /// Dyn-safe transport: returns raw JSON. Extraction (A.1/A.5.1), opinion
     /// formation (A.2), observation synthesis (A.3), Assess, and background
     /// merge all reuse it; prompts and JSON schemas are built in engine.
-    async fn complete_json<T: DeserializeOwned + JsonSchema>(&self, req: &JsonRequest) -> Result<T>;
+    async fn complete_json_raw(&self, req: JsonRequest) -> Result<serde_json::Value>;
+    fn model(&self) -> &str;
 }
+
+/// Typed convenience layer. It cannot live on `Llm` itself: a generic method
+/// would make the trait non-dyn-safe and `Box<dyn Llm>` impossible. The blanket
+/// impl covers `dyn Llm` because it is `Llm + ?Sized`.
+#[async_trait]
+pub trait LlmExt: Llm {
+    async fn complete_json<T: DeserializeOwned>(&self, req: JsonRequest) -> Result<T>;
+}
+
+#[async_trait]
+impl<T: Llm + ?Sized> LlmExt for T { /* raw JSON → T; parse failure → Error::Fatal */ }
 
 #[async_trait]
 pub trait Embedder: Send + Sync {
@@ -134,7 +146,7 @@ rescan(): pending_work → re-chunk / re-extract (stale extracting judged by upd
 ### 2.3 reflect (Answer + Opinion Formation + Reinforcement)
 
 - recall evidence → assemble the system message (name n, background h, verbalized φ(Θ) + β-dependent wording modulation).
-- One `Llm::complete_json` call produces { answer text, candidate opinions[] } (A.2: first person, confidence, reasoning).
+- One `Llm::complete_json_raw` call produces { answer text, candidate opinions[] } (A.2: first person, confidence, reasoning).
 - New opinions go through `insert_opinion`; existing opinions are reinforced (Assess → c±α; strong contradictions may rewrite text).
 
 ### 2.4 observe (Observation Synthesis + GC)

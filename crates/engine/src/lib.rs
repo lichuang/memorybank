@@ -4,9 +4,10 @@
 //! the ports (traits) that `store` and `llm` implement.
 
 pub mod error;
+pub mod ports;
 pub mod types;
 
-pub use error::Error;
+pub use error::{Error, Result};
 
 /// Crate identity, used by the workspace smoke test.
 pub const CRATE_NAME: &str = "engine";
