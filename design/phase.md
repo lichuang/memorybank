@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 0/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (0/65 total, all ❌)**
+> Current progress: **P0 1/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (1/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -19,9 +19,9 @@ Based on `design.md` (implementation design) and `memory-schema.md` (finalized l
 
 ## P0-1 Workspace Skeleton
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
-- **Content**: root `Cargo.toml` (workspace + package `memorybank`), `crates/{engine,store,llm}`, `rustfmt.toml`, clippy lints, CI script.
+- **Content**: root `Cargo.toml` (virtual workspace), `crates/{memorybank,engine,store,llm}`, `rustfmt.toml`, clippy lints, CI script.
 - **Design**: workspace members; features: `store/sqlite` (default), `store/postgres` (later); `llm/http`.
 - **Acceptance**: `cargo check/clippy/fmt --workspace` all green; `cargo tree` shows no reverse dependencies (engine does not depend on store/llm).
 - **Tests**: CI runs `cargo test --workspace`.

@@ -7,8 +7,12 @@ Based on `../docs/hindsight.pdf` (the paper) and `memory-schema.md` (the finaliz
 Workspace layout (crate names carry no product prefix; `core` is avoided because it collides with Rust's built-in crate):
 
 ```
-memorybank/                    # workspace root; root package = facade
+memorybank/                    # workspace root (virtual manifest; no root package)
 ├── crates/
+│   ├── memorybank/            # facade: public API + wiring (depends on engine/store/llm)
+│   │   ├── src/               # lib.rs (re-exports engine/llm/store)
+│   │   ├── tests/             # workspace smoke tests
+│   │   └── examples/          # quick-start examples (P5-8)
 │   ├── engine/                # domain types + ports + orchestration of the three operations (core; no concrete backend dependency)
 │   │   ├── types/             # Bank, Source, Chunk, Fact, Entity, FactEntity, FactLink...
 │   │   ├── ports/             # Store, Llm, Embedder, Reranker, TemporalParser, Clock
@@ -20,12 +24,13 @@ memorybank/                    # workspace root; root package = facade
 │   │   └── link/              # temporal / semantic / causal link construction
 │   ├── store/                 # sqlx: SQLite (default) / PostgreSQL (feature gate)
 │   └── llm/                   # OpenAI-compatible chat / embedding provider
-└── examples/, tests/
+├── design/                    # design documents (three files)
+└── docs/                      # the paper
 ```
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `memorybank` (root) | Facade: wires ports + public API + builders; the only direct dependency for users | engine + store + llm |
+| `memorybank` (facade, `crates/memorybank`) | Facade: wires ports + public API + builders; the only direct dependency for users | engine + store + llm |
 | `engine` | Domain types, port definitions, retain/recall/reflect orchestration | No concrete backend/model |
 | `store` | Implements `Store` (SQLite/PG; indexes and query dialects converge here) | engine (ports) |
 | `llm` | Implements `Llm` / `Embedder` (OpenAI-compatible HTTP) | engine (ports) |

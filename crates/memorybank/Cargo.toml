@@ -1,0 +1,15 @@
+[package]
+name = "memorybank"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Agent memory system based on the Hindsight paper (retain, recall, reflect)."
+
+[dependencies]
+engine.workspace = true
+store.workspace = true
+llm.workspace = true
+
+[lints]
+workspace = true

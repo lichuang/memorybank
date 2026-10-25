@@ -20,19 +20,19 @@ Design docs (read in this order):
 ## 2. Repository layout (target)
 
 ```
-memorybank/                 # workspace root, package = memorybank (facade)
+memorybank/                 # workspace root (virtual manifest; no root package)
 ├── crates/
+│   ├── memorybank/         # facade: public API + wiring
 │   ├── engine/             # domain types + ports + retain/recall/reflect orchestration
 │   ├── store/              # Store implementation (SQLite by default, PostgreSQL later)
 │   └── llm/                # Llm / Embedder providers (OpenAI-compatible)
 ├── design/                 # design documents (three files)
-├── docs/                   # the paper
-└── examples/
+└── docs/                   # the paper
 ```
 
 Dependency direction is fixed: **facade → engine ← adapters**. `engine` must not depend on `store` or `llm`.
 
-> Note: the crates do not exist yet; P0-1 creates them.
+> Note: P0-1 has created the crates and the virtual workspace.
 
 ## 3. Commands
 
@@ -64,7 +64,7 @@ cargo doc --workspace --no-deps
 
 ## 5. Coding standards
 
-- Rust edition 2021; `rustfmt` defaults; clippy clean.
+- Rust edition 2024 (pinned to 1.91.0 by `rust-toolchain.toml`); formatting follows `rustfmt.toml` (2-space indent, reordered imports); clippy clean.
 - **Errors**: `thiserror`; library code uses `engine::Error` (Retryable / Fatal / Config / NotFound / Conflict). No `anyhow` in library code; `anyhow` is fine in tests.
 - **Async**: tokio + `async-trait`; ports must be object-safe (`Box<dyn Store>` must compile); no blocking calls inside async contexts. Heavy CPU work (brute-force vector search, chunking) may use `spawn_blocking`.
 - **IDs**: UUIDv7, allocated in `engine` **before** the transaction; `Store` never generates business IDs.

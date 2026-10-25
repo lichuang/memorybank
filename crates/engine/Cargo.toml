@@ -1,0 +1,10 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend-agnostic core for memorybank: domain types, ports, orchestration."
+
+[lints]
+workspace = true
