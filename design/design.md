@@ -82,12 +82,15 @@ pub trait Clock: Send + Sync {
 
 #[async_trait]
 pub trait Store: Send + Sync {
-    // —— Inbox (schema §5.1, four stages) ——
-    async fn create_source(&self, new: NewSource) -> Result<SourceId>;                        // tx0
+    // —— Bank & inbox (schema §5.1, four stages) ——
+    async fn create_bank(&self, bank: Bank) -> Result<()>;
+    async fn load_bank(&self, id: BankId) -> Result<Bank>;
+    async fn create_source(&self, source: Source) -> Result<()>;                            // tx0
     async fn append_chunks(&self, src: SourceId, chunks: Vec<NewChunk>) -> Result<usize>;    // tx1; hash conflicts skipped
-    async fn claim_chunk(&self, bank: BankId) -> Result<Option<ClaimedChunk>>;               // atomic pending→extracting claim
-    async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;                         // tx2: all products + status=done atomically
+    async fn claim_chunk(&self, bank: BankId, now: Timestamp, stale_after: Duration)
+        -> Result<Option<ClaimedChunk>>;                                                     // atomic pending→extracting claim
     async fn release_chunk(&self, chunk: ChunkId) -> Result<()>;                             // on failure: back to pending
+    async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;                         // tx2: all products + status=done atomically
 
     // —— Read path (schema §5.4, four channels) ——
     async fn search_vector(&self, bank: BankId, q: &[f32], k: usize) -> Result<Vec<(FactId, f32)>>;
@@ -95,27 +98,29 @@ pub trait Store: Send + Sync {
     async fn neighbors(&self, bank: BankId, from: FactId) -> Result<Vec<Neighbor>>;          // fact_link + fact_entity-derived adjacency
     async fn facts_in_range(&self, bank: BankId, range: TimeRange) -> Result<Vec<FactId>>;
     async fn fetch_facts(&self, ids: &[FactId]) -> Result<Vec<Fact>>;
+    async fn increment_access(&self, ids: &[FactId]) -> Result<()>;
 
     // —— Entity / opinion / observation / maintenance ——
-    async fn upsert_entity(&self, new: NewEntity) -> Result<EntityId>;                       // handles UNIQUE(bank_id, canonical_name) conflicts
+    async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)>;               // (id, created); UNIQUE conflict reuses
     async fn entity_candidates(&self, bank: BankId, mention: &str) -> Result<Vec<EntityCandidate>>;
-    async fn insert_opinion(&self, op: NewOpinion) -> Result<FactId>;
-    async fn update_opinion(&self, id: FactId, confidence: f32, text: Option<String>) -> Result<()>;
+    async fn insert_opinion(&self, op: NewOpinion) -> Result<()>;
     async fn insert_observations(&self, obs: Vec<NewObservation>) -> Result<()>;
     async fn observations_of(&self, bank: BankId, entity: EntityId, limit: usize) -> Result<Vec<Fact>>;
-    async fn pending_work(&self, bank: BankId) -> Result<WorkLists>;                        // derived work lists
-    async fn reembed_batch(&self, bank: BankId, limit: usize) -> Result<usize>;
-    async fn stats(&self, ...) -> ...;
+    async fn pending_work(&self, bank: BankId, now: Timestamp, stale_after: Duration) -> Result<WorkLists>;
+    async fn update_embeddings(&self, embeddings: &[(FactId, Vec<f32>)]) -> Result<usize>;  // backfill write path
+    async fn gc_observations(&self, bank: BankId, now: Timestamp, max_age: Duration,
+                             per_entity_cap: usize) -> Result<usize>;
 }
 ```
 
 Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 
 1. **`commit_chunk` is the only transaction entry**: atomicity is guaranteed by the trait method; transaction objects never leak, so engine does not need to understand each backend's transaction API.
-2. **`neighbors()` merges multiple sources inside the adapter**: `fact_link` rows + entity adjacency derived from `fact_entity` (the closure is never materialized) — criterion 3, "single source of truth".
-3. **Work lists are always derived**: `pending_work` returns sources awaiting chunking, chunks pending/stale-claim, NULL embeddings, and entities whose evidence changed (`entity.last_seen > latest observation row's created_at`). There is no task-queue table — criterion 2, "strategies live at runtime".
-4. **No model/threshold fields**: embedding model, chunking parameters, σt/θs/top-k, µ(ℓ) all live in configuration — criterion 2.
-5. **`search_vector` must always be available**: ANN is adapter-internal optimization (SQLite brute-force cosine; pgvector indexing can be added later on PG); the contract only requires "return top-k".
+2. **IDs and time are engine-supplied** (`AGENTS.md`): the store never generates business IDs and never reads the wall clock; every creation DTO carries `id` and `created_at`, and methods that need "now" take it as a parameter.
+3. **`neighbors()` merges multiple sources inside the adapter**: `fact_link` rows + entity adjacency derived from `fact_entity` (the closure is never materialized) — criterion 3, "single source of truth". The result reports four kinds (`NeighborKind` includes `Entity`) because P2-3 applies a distinct µ per kind.
+4. **Work lists are always derived**: `pending_work` returns sources awaiting chunking, chunks pending/stale-claim, NULL embeddings, and entities whose evidence changed (`entity.last_seen > latest observation row's created_at`). There is no task-queue table — criterion 2, "strategies live at runtime".
+5. **No model/threshold fields**: embedding model, chunking parameters, σt/θs/top-k, µ(ℓ) all live in configuration — criterion 2. Embedding backfill therefore goes through `update_embeddings`: the engine owns the `Embedder`, the store only persists vectors.
+6. **`search_vector` must always be available**: ANN is adapter-internal optimization (SQLite brute-force cosine; pgvector indexing can be added later on PG); the contract only requires "return top-k".
 
 ## 2. Pipeline Implementation Notes
 

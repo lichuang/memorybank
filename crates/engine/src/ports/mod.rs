@@ -11,10 +11,16 @@ pub mod clock;
 pub mod embedder;
 pub mod llm;
 pub mod reranker;
+pub mod store;
 pub mod temporal;
 
 pub use clock::{Clock, now_ts};
 pub use embedder::Embedder;
 pub use llm::{JsonRequest, Llm, LlmExt};
 pub use reranker::Reranker;
+pub use store::{
+  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NeighborKind, NewBinding,
+  NewChunk, NewEntity, NewFact, NewLink, NewObservation, NewOpinion, OpinionConfidenceUpdate,
+  Store, WorkLists,
+};
 pub use temporal::TemporalParser;

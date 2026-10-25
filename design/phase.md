@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 6/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (6/65 total)**
+> Current progress: **P0 7/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (7/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -143,35 +143,54 @@ pub fn now_ts(clock: &dyn Clock) -> Timestamp            // truncated to millise
 
 ## P0-7 Store Port (Method Set)
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
 - **Content**: the full storage contract + DTOs.
 - **Design**:
 ```rust
-pub struct NewSource { bank_id, title, payload_text }
-pub struct NewChunk { bank_id, source_id, chunk_index, text, content_hash, time_start, time_end }
-pub struct ClaimedChunk { pub chunk: Chunk }
-pub struct NewFact { pub id: FactId, bank_id, fact_type, text, chunk_id: Option<ChunkId>,
-  embedding: Option<Vec<f32>>, occurred_start/end, mentioned_at, confidence }
-pub struct NewBinding { pub fact_id: FactId, pub entity_id: EntityId, pub mention_text: Option<String> }
-pub struct NewLink { pub from: FactId, pub to: FactId, pub link_type: LinkType,
-  pub relation: Option<CausalRelation>, pub weight: f32 }
-pub struct EntityStatUpdate { pub entity_id: EntityId, pub add: bool, pub at: Option<Timestamp> }
-pub struct OpinionConfidenceUpdate { pub opinion_id: FactId, pub new_confidence: f32, pub new_text: Option<String> }
-pub struct ChunkCommit { pub chunk_id: ChunkId, pub facts: Vec<NewFact>, pub entities: Vec<Entity>,
-  pub bindings: Vec<NewBinding>, pub links: Vec<NewLink>,
-  pub entity_stats: Vec<EntityStatUpdate>, pub opinion_updates: Vec<OpinionConfidenceUpdate> }
+pub struct NewEntity { pub id: EntityId, pub bank_id: BankId, pub canonical_name: String,
+  pub entity_type: EntityKind, pub created_at: Timestamp }
+pub struct NewChunk { pub id: ChunkId, pub bank_id: BankId, pub source_id: SourceId,
+  pub chunk_index: u32, pub text: String, pub content_hash: String,
+  pub time_start/time_end: Option<Timestamp>, pub created_at: Timestamp }
+pub struct ClaimedChunk { pub chunk: Chunk }                        // status = Extracting
+pub struct NewFact { pub id: FactId, pub bank_id: BankId, pub fact_type: FactType,
+  pub text: String, pub chunk_id: Option<ChunkId>, pub embedding: Option<Vec<f32>>,
+  pub occurred_start/occurred_end/mentioned_at: Option<Timestamp>,
+  pub confidence: Option<f32>, pub attrs: Option<serde_json::Value>, pub created_at: Timestamp }
+pub struct NewBinding { pub bank_id: BankId, pub fact_id: FactId, pub entity_id: EntityId,
+  pub mention_text: Option<String>, pub created_at: Timestamp }
+pub struct NewLink { pub id: LinkId, pub bank_id: BankId, pub from: FactId, pub to: FactId,
+  pub link_type: LinkType, pub relation: Option<CausalRelation>, pub weight: f32,
+  pub created_at: Timestamp }
+pub struct EntityStatUpdate { pub entity_id: EntityId, pub add: bool, pub at: Option<Timestamp>,
+  pub updated_at: Timestamp }
+pub struct OpinionConfidenceUpdate { pub opinion_id: FactId, pub new_confidence: f32,
+  pub new_text: Option<String>, pub updated_at: Timestamp }
+pub struct ChunkCommit { pub chunk_id: ChunkId, pub completed_at: Timestamp,
+  pub facts: Vec<NewFact>, pub entities: Vec<Entity>, pub bindings: Vec<NewBinding>,
+  pub links: Vec<NewLink>, pub entity_stats: Vec<EntityStatUpdate>,
+  pub opinion_updates: Vec<OpinionConfidenceUpdate> }
+pub struct NewOpinion { pub id: FactId, pub bank_id: BankId, pub text: String,
+  pub confidence: f32, pub entities: Vec<(EntityId, Option<String>)>,
+  pub embedding: Option<Vec<f32>>, pub created_at: Timestamp }
+pub struct NewObservation { pub fact_id: FactId, pub bank_id: BankId, pub text: String,
+  pub embedding: Option<Vec<f32>>, pub entity_ids: Vec<EntityId>, pub created_at: Timestamp }
 pub struct WorkLists { pub sources_received: Vec<SourceId>, pub chunks_pending: Vec<ChunkId>,
   pub chunks_stale: Vec<ChunkId>, pub facts_missing_embedding: Vec<FactId>,
   pub entities_stale_observation: Vec<EntityId> }
+pub enum NeighborKind { Temporal, Semantic, Causal, Entity }
+pub struct Neighbor { pub fact_id: FactId, pub kind: NeighborKind, pub weight: f32 }
+pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
+  pub last_mention_at: Option<Timestamp> }
 
 #[async_trait] pub trait Store: Send+Sync {
-  // bank/inbox
-  async fn create_bank(&self, name:&str, profile:BankProfile)->Result<BankId>;
+  // bank / inbox
+  async fn create_bank(&self, bank:Bank)->Result<()>;
   async fn load_bank(&self, id:BankId)->Result<Bank>;
-  async fn create_source(&self, s:NewSource)->Result<SourceId>;
-  async fn append_chunks(&self, src:SourceId, chunks:Vec<NewChunk>)->Result<usize>; // returns inserted count
-  async fn claim_chunk(&self, bank:BankId, stale_after:Duration)->Result<Option<ClaimedChunk>>;
+  async fn create_source(&self, source:Source)->Result<()>;
+  async fn append_chunks(&self, src:SourceId, chunks:Vec<NewChunk>)->Result<usize>;  // inserted count
+  async fn claim_chunk(&self, bank:BankId, now:Timestamp, stale_after:Duration)->Result<Option<ClaimedChunk>>;
   async fn release_chunk(&self, chunk:ChunkId)->Result<()>;
   async fn commit_chunk(&self, c:ChunkCommit)->Result<()>;
   // retrieval
@@ -181,20 +200,27 @@ pub struct WorkLists { pub sources_received: Vec<SourceId>, pub chunks_pending: 
   async fn facts_in_range(&self, bank:BankId, r:TimeRange)->Result<Vec<FactId>>;
   async fn fetch_facts(&self, ids:&[FactId])->Result<Vec<Fact>>;
   async fn increment_access(&self, ids:&[FactId])->Result<()>;
-  // entity/opinion/observation/maintenance
-  async fn ensure_entity(&self, bank:BankId, name:&str, kind:EntityKind)->Result<(EntityId,bool)>;
+  // entity / opinion / observation / maintenance
+  async fn ensure_entity(&self, new:NewEntity)->Result<(EntityId,bool)>;   // (id, created)
   async fn entity_candidates(&self, bank:BankId, mention:&str)->Result<Vec<EntityCandidate>>;
-  async fn insert_opinion(&self, o:NewOpinion)->Result<FactId>;
+  async fn insert_opinion(&self, o:NewOpinion)->Result<()>;
   async fn insert_observations(&self, o:Vec<NewObservation>)->Result<()>;
   async fn observations_of(&self, bank:BankId, entity:EntityId, limit:usize)->Result<Vec<Fact>>;
-  async fn pending_work(&self, bank:BankId)->Result<WorkLists>;
-  async fn reembed_batch(&self, bank:BankId, limit:usize)->Result<usize>;
-  async fn gc_observations(&self, bank:BankId, max_age:Duration, per_entity_cap:usize)->Result<usize>;
+  async fn pending_work(&self, bank:BankId, now:Timestamp, stale_after:Duration)->Result<WorkLists>;
+  async fn update_embeddings(&self, embeddings:&[(FactId,Vec<f32>)] )->Result<usize>;
+  async fn gc_observations(&self, bank:BankId, now:Timestamp, max_age:Duration,
+                           per_entity_cap:usize)->Result<usize>;
 }
-pub struct Neighbor { pub fact_id: FactId, pub link_type: LinkType, pub weight: f32 }
-pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>, pub last_mention_at: Option<Timestamp> }
 ```
-- **Key semantics** (documented in trait doc comments): `claim_chunk` claims atomically and reclaims stale `extracting` rows; `commit_chunk` flips status→done in the same transaction; `append_chunks` skips hash conflicts; `neighbors` merges `fact_link` with adjacency derived from `fact_entity`.
+- **Key semantics** (documented in trait doc comments):
+  - **IDs and time are engine-supplied** (`AGENTS.md`): the store never generates business IDs and never reads the wall clock; every creation DTO carries `id` and `created_at`.
+  - `claim_chunk` claims atomically and reclaims stale `extracting` rows (`now - updated_at > stale_after`), refreshing `updated_at = now`; returns `None` when nothing is claimable.
+  - `commit_chunk` is the only transaction entry for extraction products: facts / bindings / links / entity stats / opinion updates / status→done (`completed_at`) commit together. If a listed entity hits `UNIQUE(bank_id, canonical_name)`, the store reuses the existing row and rewrites the bindings that referenced the new id.
+  - `append_chunks` skips any chunk whose `(bank_id, content_hash)` already exists and returns the inserted count.
+  - `neighbors` merges `fact_link` rows with adjacency derived from `fact_entity` (weight 1.0, `NeighborKind::Entity`); the pairwise closure is never materialized. Four kinds are reported because P2-3 applies a distinct `mu` per kind.
+  - `insert_opinion` writes the opinion row plus its `fact_entity` bindings in one transaction; `insert_observations` appends observation rows plus bindings, never replacing an older batch.
+  - `pending_work` derives all lists in-database; `update_embeddings` is the backfill write path (the engine owns the `Embedder`, so the store cannot re-embed by itself); `increment_access` batches counter bumps and leaves `updated_at` untouched.
+  - `gc_observations` deletes observation rows older than `now - max_age`, then keeps the newest `per_entity_cap` rows per entity binding, in one transaction.
 - **Acceptance**: the trait is object-safe; DTOs leak no backend types.
 - **Tests**: compile-time object-safety test; DTO serde.
 
@@ -633,7 +659,7 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
 
 **Status**: ❌
 
-- **Design**: `NewOpinion { id, bank_id, text, confidence, entities: Vec<(EntityId, Option<String>)>, embedding }`; entity binding via `bind_known_entities(store, bank, text)` (exact/substring matching against canonical names/variants, no LLM calls).
+- **Design**: `NewOpinion { id, bank_id, text, confidence, entities: Vec<(EntityId, Option<String>)>, embedding, created_at }`; entity binding via `bind_known_entities(store, bank, text)` (exact/substring matching against canonical names/variants, no LLM calls).
 - **Acceptance**: chunk_id=None; confidence required; embedding written.
 - **Tests**: 0/2 entities bound; text containing multiple known entities.
 
