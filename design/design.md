@@ -160,7 +160,7 @@ rescan(): pending_work → re-chunk / re-extract (stale extracting judged by upd
 | Concern | Approach |
 |---|---|
 | Async runtime | tokio; ports use `async_trait` (dyn-compatible, injectable at runtime) |
-| Errors | `thiserror` with three classes: `Retryable` (LLM timeouts, DB contention) / `Fatal` (data corruption) / `Config`; workers retry only Retryable |
+| Errors | `thiserror`; `engine::Error` with five variants: `Retryable` (LLM timeouts, DB contention) / `Fatal` (invalid model output, data corruption) / `Config` (invalid configuration or caller settings) / `NotFound` / `Conflict`; workers retry only `Retryable` |
 | Configuration | serde structs: bank profile (Θ/β), model choices, thresholds, chunking parameters, concurrency |
 | Observability | `tracing` spans: per-chunk latency, LLM calls/retries, per-channel recall hits, budget usage |
 | IDs/Time | UUIDv7; chrono UTC |

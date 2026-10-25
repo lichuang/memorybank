@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 4/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (4/65 total)**
+> Current progress: **P0 5/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (5/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -105,7 +105,7 @@ pub struct ObservationResponse { pub observations: Vec<ObservationDraft> }
 
 ## P0-5 Error System
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
 - **Content**: `engine::Error` + retry classification.
 - **Design**: `pub fn is_retryable(&self)->bool`; Store/Llm errors converted via `From`; `NotFound(&'static str, String)`.
