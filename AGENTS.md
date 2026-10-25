@@ -59,7 +59,7 @@ cargo doc --workspace --no-deps
    - update the phase progress counters at the top of `design/phase.md`.
 4. Commit message format: `P<phase>-<index>: <task name>`, e.g. `P0-2: id and time primitives`.
 5. Every task ships with tests; run phase-level integration tests plus `fmt` / `clippy` at the end of each phase.
-6. **Do not decide open design questions on your own** (listed in `design/design.md` §6 and `memory-schema.md` §7 — e.g. §7.A#2 confidence, causal normalization / relation narrowing, whether to split the Store trait). Ask a human first.
+6. **Do not decide open design questions on your own** (listed in `design/design.md` §6 and `memory-schema.md` §7 — e.g. §7.A#2 confidence, causal normalization / relation narrowing). Ask a human first.
 7. Do not `git commit` or `git push` unless explicitly asked.
 
 ## 5. Coding standards

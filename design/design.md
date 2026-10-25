@@ -122,6 +122,14 @@ Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 5. **No model/threshold fields**: embedding model, chunking parameters, σt/θs/top-k, µ(ℓ) all live in configuration — criterion 2. Embedding backfill therefore goes through `update_embeddings`: the engine owns the `Embedder`, the store only persists vectors.
 6. **`search_vector` must always be available**: ANN is adapter-internal optimization (SQLite brute-force cosine; pgvector indexing can be added later on PG); the contract only requires "return top-k".
 
+**Store shape (decided in P0-8): one trait.** The contract stays a single `Store` for the first version:
+
+- Every method is object-safe, so `Box<dyn Store>` / `Arc<dyn Store>` injects cleanly and the engine has exactly one dependency to wire.
+- Capability boundaries (read / write / maintenance) are *behavioral*, not *structural*: the same adapter owns the tables, and splitting would hand the engine two or three handles to the same connection pool without buying isolation.
+- The composition would be a supertrait (`trait Store: StoreRead + StoreWrite + StoreMaintenance`) if it ever happens, so call sites typed as `&dyn Store` survive the split unchanged.
+
+**Split trigger (recorded, not planned):** split when a consumer genuinely needs only a subset — e.g. a read-only serving replica (`search_*` / `fetch_facts` only), a maintenance worker running with narrower credentials (`pending_work` / `update_embeddings` / `gc_observations`), or a third-party adapter that can implement retrieval but not ingestion. The cut is then `StoreRead` (`load_bank`, `search_vector`, `search_bm25`, `neighbors`, `facts_in_range`, `fetch_facts`, `observations_of`, `entity_candidates`) / `StoreWrite` (`create_bank`, `create_source`, `append_chunks`, `claim_chunk`, `release_chunk`, `commit_chunk`, `ensure_entity`, `insert_opinion`, `insert_observations`, `update_embeddings`, `increment_access`) / `StoreMaintenance` (`pending_work`, `gc_observations`), with `commit_chunk` remaining the only transaction entry.
+
 ## 2. Pipeline Implementation Notes
 
 ### 2.1 retain (Inbox + Extraction)
@@ -204,7 +212,7 @@ rescan(): pending_work → re-chunk / re-extract (stale extracting judged by upd
 
 ## 6. Open Items
 
-1. `Store` shape: single trait (current draft) vs capability sub-traits (read/write/maintenance) — settle in P0.
+1. ~~`Store` shape: single trait (current draft) vs capability sub-traits (read/write/maintenance) — settle in P0.~~ **Resolved in P0-8**: single trait; the split trigger and the proposed read/write/maintenance cut are recorded in §1.
 2. Whether retain's default API is synchronous or asynchronous (schema §7.B#7 recommends synchronous first).
 3. First implementations of reranker / temporal parser (identity stub + rule-based parser first; model-based versions deferred).
 4. Tokenization for chunking and the budget estimator (do we reuse the embedding model's tokenizer?).

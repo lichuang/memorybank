@@ -409,8 +409,8 @@ mod tests {
     async fn create_bank(&self, _bank: Bank) -> Result<()> {
       unreachable!("stub")
     }
-    async fn load_bank(&self, _id: BankId) -> Result<Bank> {
-      unreachable!("stub")
+    async fn load_bank(&self, id: BankId) -> Result<Bank> {
+      Err(crate::Error::not_found("bank", id.to_string()))
     }
     async fn create_source(&self, _source: Source) -> Result<()> {
       unreachable!("stub")
@@ -516,6 +516,20 @@ mod tests {
   fn store_is_object_safe_and_send_sync() {
     assert_send_sync::<Box<dyn Store>>();
     let _store: Box<dyn Store> = Box::new(StubStore);
+  }
+
+  #[tokio::test]
+  async fn dyn_injection_dispatches_through_the_trait_object() {
+    let boxed: Box<dyn Store> = Box::new(StubStore);
+    let error = boxed.load_bank(BankId::new()).await.expect_err("stub bank");
+    assert!(matches!(error, crate::Error::NotFound("bank", _)));
+
+    let shared: std::sync::Arc<dyn Store> = std::sync::Arc::new(StubStore);
+    let error = shared
+      .load_bank(BankId::new())
+      .await
+      .expect_err("stub bank");
+    assert!(matches!(error, crate::Error::NotFound("bank", _)));
   }
 
   #[test]

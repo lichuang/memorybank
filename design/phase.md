@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 7/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (7/65 total)**
+> Current progress: **P0 8/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (8/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -226,9 +226,14 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
 
 ## P0-8 Store Shape Finalization
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
 - **Content**: land the single-trait decision + a note on the splitting contingency (read/write/maintenance).
+- **Decision** (recorded in `design/design.md` §1 "Store shape" and closing §6 item 1):
+  - one object-safe `Store` trait; the engine holds a single `Box<dyn Store>` / `Arc<dyn Store>` handle;
+  - capability boundaries are behavioral, not structural — one adapter owns the tables, so sub-traits would hand the engine several handles to the same pool without isolation;
+  - if a split happens, it is a supertrait composition (`Store: StoreRead + StoreWrite + StoreMaintenance`), so existing `&dyn Store` call sites keep compiling.
+  - **Split trigger**: a consumer needs only a subset — read-only serving replica, narrower-credential maintenance worker, or a third-party adapter that can serve retrieval but not ingestion. Proposed cut: `StoreRead` (load/search/neighbors/fetch/observations/candidates) / `StoreWrite` (bank, inbox, claim/commit, opinions, observations, embeddings, access) / `StoreMaintenance` (`pending_work`, `gc_observations`); `commit_chunk` stays the only transaction entry.
 - **Acceptance**: `let s: Box<dyn Store>` compiles; the doc records the trigger for splitting (e.g. a read-only backend).
 - **Tests**: dyn injection smoke test.
 
