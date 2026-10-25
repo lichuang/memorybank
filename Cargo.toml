@@ -13,6 +13,11 @@ engine = { path = "crates/engine" }
 store = { path = "crates/store" }
 llm = { path = "crates/llm" }
 
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

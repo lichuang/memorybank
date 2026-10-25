@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 1/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (1/65 total)**
+> Current progress: **P0 2/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (2/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -28,7 +28,7 @@ Based on `design.md` (implementation design) and `memory-schema.md` (finalized l
 
 ## P0-2 ID and Time Primitives
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
 - **Content**: 5 ID newtypes + a time alias.
 - **Design**:
