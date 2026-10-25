@@ -39,6 +39,24 @@ pub trait Llm: Send + Sync {
 
   /// Model identifier, recorded for observability and cutover checks.
   fn model(&self) -> &str;
+
+  /// Whether the provider accepts a JSON Schema natively (e.g. OpenAI
+  /// `response_format: json_schema`).
+  ///
+  /// `false` means the adapter must render the schema into the prompt itself
+  /// and extract JSON from the completion — the usual case for small local
+  /// models and `json_object`-only endpoints.
+  fn supports_json_schema(&self) -> bool {
+    true
+  }
+
+  /// Context window in tokens when known; the engine uses it to trim prompts.
+  ///
+  /// `None` means unknown or unbounded; the engine then relies on
+  /// `JsonRequest::max_tokens` and configuration.
+  fn context_window(&self) -> Option<usize> {
+    None
+  }
 }
 
 /// Typed convenience layer over [`Llm`].
@@ -46,6 +64,11 @@ pub trait Llm: Send + Sync {
 /// Callers import this trait to call `complete_json::<T>(req)` on any [`Llm`],
 /// including trait objects (`dyn Llm` satisfies the blanket impl because the
 /// bound is `Llm + ?Sized`).
+///
+/// Structured-output repair belongs to the adapter: a provider that cannot
+/// guarantee schema conformance may feed the validation error back to the model
+/// a bounded number of times. Only after that does a parse failure become
+/// [`Error::Fatal`] here.
 #[async_trait]
 pub trait LlmExt: Llm {
   /// Sends `req` and deserializes the response into `T`.
@@ -124,5 +147,44 @@ mod tests {
     assert!(matches!(error, Error::Fatal(_)));
     assert!(!error.is_retryable());
     assert!(error.to_string().contains("fact_extraction"));
+  }
+
+  /// Local-style adapter: no native schema support and a small context window.
+  struct LocalStub;
+
+  #[async_trait]
+  impl Llm for LocalStub {
+    async fn complete_json_raw(&self, _req: JsonRequest) -> Result<Value> {
+      Ok(json!({}))
+    }
+
+    fn model(&self) -> &str {
+      "local-stub"
+    }
+
+    fn supports_json_schema(&self) -> bool {
+      false
+    }
+
+    fn context_window(&self) -> Option<usize> {
+      Some(4096)
+    }
+  }
+
+  #[test]
+  fn capability_defaults_favor_hosted_providers() {
+    let llm: Box<dyn Llm> = Box::new(StubLlm);
+
+    assert!(llm.supports_json_schema());
+    assert_eq!(llm.context_window(), None);
+  }
+
+  #[test]
+  fn capability_overrides_are_visible_through_the_trait_object() {
+    let llm: Box<dyn Llm> = Box::new(LocalStub);
+
+    assert!(!llm.supports_json_schema());
+    assert_eq!(llm.context_window(), Some(4096));
+    assert_eq!(llm.model(), "local-stub");
   }
 }

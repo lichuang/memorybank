@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 8/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (8/65 total)**
+> Current progress: **P0 8/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (8/66 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -125,6 +125,8 @@ pub struct JsonRequest { pub system: Option<String>, pub user: String,
 #[async_trait] pub trait Llm: Send+Sync {                                  // dyn-safe
   async fn complete_json_raw(&self, req: JsonRequest) -> Result<serde_json::Value>;
   fn model(&self) -> &str;
+  fn supports_json_schema(&self) -> bool { true }        // false → adapter renders the schema into the prompt
+  fn context_window(&self) -> Option<usize> { None }     // used by the engine to trim prompts
 }
 #[async_trait] pub trait LlmExt: Llm {                                     // generic convenience layer
   async fn complete_json<T: DeserializeOwned>(&self, req: JsonRequest) -> Result<T>;
@@ -834,6 +836,20 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
 - **Acceptance**: `cargo run --example` works (fake mode, no API key).
 - **Tests**: examples compile + smoke run.
 
+## P5-9 Local Model Adapter
+
+**Status**: ❌
+
+- **Content**: first-class local-model support: OpenAI-compatible local endpoints plus an optional in-process adapter.
+- **Design**:
+  - HTTP path: the existing adapter works unchanged against Ollama / vLLM / llama.cpp server / SGLang / LM Studio (`base_url` + `model`, `api_key` optional, timeout configured per adapter).
+  - Optional `llm/local` feature: in-process `Llm` / `Embedder` adapters (candle, ONNX Runtime, or mistral.rs); blocking inference runs on `spawn_blocking` or a dedicated bounded worker pool, never on the async runtime thread; heavy dependencies stay behind the feature flag.
+  - Capability mapping: when `supports_json_schema()` is `false`, render the schema into the prompt and extract JSON from the completion; use grammar/guided decoding (GBNF, guided JSON) where the runtime supports it.
+  - Bounded repair: on a validation failure, feed the error plus schema back to the model up to N times; transient provider failures → `Retryable`, exhausted repair → `Fatal`.
+  - Timeout, concurrency, batch size, and embedding normalization are adapter configuration, not schema or engine concerns.
+- **Acceptance**: a local endpoint (or in-process model) satisfies the same `Llm` / `Embedder` contract suite as the HTTP provider; no blocking calls on the async runtime; no schema change; default build does not pull in model-runtime dependencies.
+- **Tests**: wiremock for the HTTP path; in-process adapter `#[ignore]`d when weights are unavailable; repair-path unit tests (invalid JSON → repaired → valid; repair exhausted → `Fatal`).
+
 ---
 
 # Delivery Notes
@@ -841,4 +857,4 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
 - One commit per step; commit message `P<phase>-<index>: <task>`;
 - P0/P1 are the mainline and should be **reviewed per task before merging**; from P2 onward, retrieval and reflection can proceed in parallel;
 - End of each phase: `cargo test --workspace` + phase integration tests + clippy/fmt;
-- Settle open semantics before starting the relevant task: §7.A#2 (confidence), causal normalization/relation narrowing, whether to split the Store trait, token-estimator implementation.
+- Settle open semantics before starting the relevant task: §7.A#2 (confidence), causal normalization/relation narrowing, token-estimator implementation.

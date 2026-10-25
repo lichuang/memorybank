@@ -23,7 +23,7 @@ memorybank/                    # workspace root (virtual manifest; no root packa
 │   │   ├── resolve/           # entity resolution ρ
 │   │   └── link/              # temporal / semantic / causal link construction
 │   ├── store/                 # sqlx: SQLite (default) / PostgreSQL (feature gate)
-│   └── llm/                   # OpenAI-compatible chat / embedding provider
+│   └── llm/                   # HTTP-compatible provider + optional local adapters
 ├── design/                    # design documents (three files)
 └── docs/                      # the paper
 ```
@@ -47,11 +47,24 @@ pub trait Llm: Send + Sync {
     /// merge all reuse it; prompts and JSON schemas are built in engine.
     async fn complete_json_raw(&self, req: JsonRequest) -> Result<serde_json::Value>;
     fn model(&self) -> &str;
+
+    /// Whether the provider accepts a JSON Schema natively (e.g. OpenAI
+    /// `response_format: json_schema`). `false` means the adapter renders the
+    /// schema into the prompt and extracts JSON from the completion.
+    fn supports_json_schema(&self) -> bool { true }
+
+    /// Context window in tokens when known; the engine uses it to trim prompts.
+    fn context_window(&self) -> Option<usize> { None }
 }
 
 /// Typed convenience layer. It cannot live on `Llm` itself: a generic method
 /// would make the trait non-dyn-safe and `Box<dyn Llm>` impossible. The blanket
 /// impl covers `dyn Llm` because it is `Llm + ?Sized`.
+///
+/// Structured-output repair is the adapter's responsibility: a provider that
+/// cannot guarantee schema conformance (local models, `json_object`-only
+/// endpoints) may feed the validation error back to the model a bounded number
+/// of times. Only after that does a parse failure become `Error::Fatal` here.
 #[async_trait]
 pub trait LlmExt: Llm {
     async fn complete_json<T: DeserializeOwned>(&self, req: JsonRequest) -> Result<T>;
@@ -59,6 +72,14 @@ pub trait LlmExt: Llm {
 
 #[async_trait]
 impl<T: Llm + ?Sized> LlmExt for T { /* raw JSON → T; parse failure → Error::Fatal */ }
+```
+
+**Local models are first-class adapters, not a fork of the engine.** Two shapes:
+
+- **HTTP-compatible (default)**: the `llm` adapter is an OpenAI-compatible client; Ollama, vLLM, llama.cpp's server, SGLang, and LM Studio all expose compatible endpoints, so a local model usually needs configuration (`base_url`, `model`, optional `api_key`, timeout), not new code.
+- **In-process (optional feature, e.g. `llm/local`)**: candle / ONNX Runtime / mistral.rs adapters implement `Llm` and `Embedder` directly. Inference is blocking GPU/CPU work, so it must run on `spawn_blocking` or a dedicated worker pool with bounded concurrency — never on the async runtime thread. Heavy model dependencies stay behind the feature flag so the default build stays light.
+
+Local-specific concerns that stay inside adapters: timeout and retry policy (`Retryable` for transient failures), batch size for embeddings, dimension matching (`Embedder::dim`), grammar/guided decoding where available (GBNF, guided JSON), and schema rendering when `supports_json_schema()` is `false`. None of this changes the schema or the engine.
 
 #[async_trait]
 pub trait Embedder: Send + Sync {

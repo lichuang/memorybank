@@ -12,7 +12,7 @@ Design docs (read in this order):
 
 | Document | Purpose |
 |---|---|
-| `design/phase.md` | **What to do**: 65 implementation tasks (P0–P5) with content / design / acceptance / tests and status markers |
+| `design/phase.md` | **What to do**: 66 implementation tasks (P0–P5) with content / design / acceptance / tests and status markers |
 | `design/design.md` | **How to build it**: workspace layout, port contracts, pipeline implementation, testing strategy |
 | `design/memory-schema.md` | **What the data looks like**: 7 tables, admission criteria (§1.3), data flow, retired constructs (§7.C) |
 | `docs/hindsight.pdf` | The paper — the final authority for design trade-offs |
@@ -25,7 +25,7 @@ memorybank/                 # workspace root (virtual manifest; no root package)
 │   ├── memorybank/         # facade: public API + wiring
 │   ├── engine/             # domain types + ports + retain/recall/reflect orchestration
 │   ├── store/              # Store implementation (SQLite by default, PostgreSQL later)
-│   └── llm/                # Llm / Embedder providers (OpenAI-compatible)
+│   └── llm/                # Llm / Embedder providers (HTTP-compatible + optional local adapters)
 ├── design/                 # design documents (three files)
 └── docs/                   # the paper
 ```
