@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 2/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (2/65 total)**
+> Current progress: **P0 3/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (3/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -48,7 +48,7 @@ pub fn now_ts(clock:&dyn Clock) -> Timestamp
 
 ## P0-3 Domain Enums and Structs
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
 - **Content**: all core enums/row structs.
 - **Design**:
@@ -59,13 +59,12 @@ pub enum ChunkStatus { Pending, Extracting, Done, Failed }
 pub enum CausalRelation { Causes, CausedBy, Enables, Prevents }   // normalization pending decision
 pub enum EntityKind { Person, Organization, Location, Product, Concept, Other }
 pub enum SourceStatus { Received, Chunked }
-pub enum SourceKind { Transcript, Document, Message, Api }
 
 pub struct BankProfile { pub background: String, pub skepticism: u8, pub literalism: u8, pub empathy: u8, pub bias_strength: f32 }
 impl BankProfile { pub fn validate(&self)->Result<()>; }   // 1..=5, 0..=1
 
 pub struct Bank { id, name: String, profile: BankProfile, created_at, updated_at }
-pub struct Source { id, bank_id, kind, title: Option<String>, payload_text: String, status, created_at, updated_at }
+pub struct Source { id, bank_id, title: Option<String>, payload_text: String, status, created_at, updated_at }
 pub struct Chunk { id, bank_id, source_id, chunk_index: u32, text: String, content_hash: String,
                    status: ChunkStatus, time_start: Option<Timestamp>, time_end: Option<Timestamp>, created_at, updated_at }
 pub struct Fact { id, bank_id, fact_type: FactType, text: String, chunk_id: Option<ChunkId>,
@@ -144,7 +143,7 @@ pub trait Clock: Send+Sync { fn now(&self)->Timestamp; }
 - **Content**: the full storage contract + DTOs.
 - **Design**:
 ```rust
-pub struct NewSource { bank_id, kind, title, payload_text }
+pub struct NewSource { bank_id, title, payload_text }
 pub struct NewChunk { bank_id, source_id, chunk_index, text, content_hash, time_start, time_end }
 pub struct ClaimedChunk { pub chunk: Chunk }
 pub struct NewFact { pub id: FactId, bank_id, fact_type, text, chunk_id: Option<ChunkId>,

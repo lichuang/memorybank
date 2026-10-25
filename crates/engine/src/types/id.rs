@@ -76,6 +76,7 @@ id_type!(SourceId, "Identifier of an ingested source (ledger entry).");
 id_type!(ChunkId, "Identifier of a chunk slice.");
 id_type!(FactId, "Identifier of a fact row.");
 id_type!(EntityId, "Identifier of a canonical entity.");
+id_type!(LinkId, "Identifier of a fact link edge.");
 
 #[cfg(test)]
 mod tests {
