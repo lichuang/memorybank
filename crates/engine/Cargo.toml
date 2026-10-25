@@ -8,6 +8,7 @@ description = "Backend-agnostic core for memorybank: domain types, ports, orches
 
 [dependencies]
 chrono.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

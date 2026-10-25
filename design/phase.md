@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 3/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (3/65 total)**
+> Current progress: **P0 4/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/8 (4/65 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -81,7 +81,7 @@ pub struct FactLink { id, bank_id, from_fact_id, to_fact_id, link_type: LinkType
 
 ## P0-4 Structured Output DTOs (paper A.5.1/A.2/A.3)
 
-**Status**: ❌
+**Status**: ✅ (2026-10-25)
 
 - **Content**: LLM round-trip contracts + JSON Schema (schemars).
 - **Design**:

@@ -3,13 +3,14 @@
 //! All enums serialize as snake_case strings; the store maps them to its own
 //! column representation.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The four memory networks from the paper (the `fact_type` column).
 ///
 /// Extraction produces `World`, `Experience`, and `Opinion` rows; `Observation`
 /// rows come only from the observation synthesis pipeline (paper A.5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FactType {
   /// Objective facts about the external world.
@@ -26,7 +27,7 @@ pub enum FactType {
 ///
 /// Entity adjacency is deliberately absent: it is derived from `fact_entity`
 /// bindings during traversal (schema §0.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkType {
   /// Undirected, stored as a reciprocal pair of rows.
@@ -39,7 +40,7 @@ pub enum LinkType {
 }
 
 /// Extraction progress of a chunk (the idempotency and transaction unit).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkStatus {
   /// Awaiting extraction.
@@ -56,7 +57,7 @@ pub enum ChunkStatus {
 ///
 /// Direction normalization is still an open decision (`design/design.md` §6);
 /// the four paper values are kept until it is settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CausalRelation {
   /// The source fact caused the target fact.
@@ -70,7 +71,7 @@ pub enum CausalRelation {
 }
 
 /// Canonical entity categories (paper §4.1.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityKind {
   /// A person.
@@ -88,7 +89,7 @@ pub enum EntityKind {
 }
 
 /// Ingest progress of a source row (the transactional inbox).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceStatus {
   /// Persisted by tx0, awaiting chunking.
