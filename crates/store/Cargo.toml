@@ -8,8 +8,14 @@ description = "Storage adapters for memorybank (SQLite by default, PostgreSQL la
 
 [features]
 default = ["sqlite"]
-sqlite = []
-postgres = []
+sqlite = ["dep:sqlx", "sqlx/sqlite", "sqlx/runtime-tokio"]
+postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/runtime-tokio"]
+
+[dependencies]
+sqlx = { version = "0.8", default-features = false, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

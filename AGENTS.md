@@ -48,7 +48,7 @@ cargo doc --workspace --no-deps
 
 - Unit and integration tests need **no external database** (in-memory SQLite) and **no API keys** (fakes are the default).
 - Real providers are used only when explicitly configured (P5 and later).
-- Migrations live in `crates/store/migrations/` and are applied by `store::migrate()`.
+- Migrations live in `crates/store/migrations/<backend>/` (e.g. `migrations/sqlite/0001_init.sql`) and are applied by `store::migrate()`; keep the logical schema in sync first (`design/memory-schema.md`).
 
 ## 4. Workflow
 

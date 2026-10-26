@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 8/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (8/66 total)**
+> Current progress: **P0 9/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (9/66 total)**
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -241,7 +241,7 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
 
 ## P0-9 Migration 0001 (SQLite)
 
-**Status**: ❌
+**Status**: ✅ (2026-10-26)
 
 - **Content**: 7-table DDL + FTS + indexes + constraints.
 - **Design**:
