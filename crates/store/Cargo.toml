@@ -4,15 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Storage adapters for memorybank (SQLite by default, PostgreSQL later)."
-
-[features]
-default = ["sqlite"]
-sqlite = ["dep:sqlx", "sqlx/sqlite", "sqlx/runtime-tokio"]
-postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/runtime-tokio"]
+description = "SQLite storage adapter for memorybank."
 
 [dependencies]
-sqlx = { version = "0.8", default-features = false, optional = true }
+engine.workspace = true
+sqlx = { version = "0.8", default-features = false, features = [
+  "sqlite",
+  "runtime-tokio",
+  "migrate",
+  "macros",
+] }
 
 [dev-dependencies]
 tokio.workspace = true

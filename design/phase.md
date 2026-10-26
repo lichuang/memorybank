@@ -3,7 +3,9 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 9/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (9/66 total)**
+> Current progress: **P0 10/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (10/66 total)**
+
+> **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
 ## Common Conventions (apply to every step; not repeated below)
 
@@ -22,7 +24,7 @@ Based on `design.md` (implementation design) and `memory-schema.md` (finalized l
 **Status**: ✅ (2026-10-25)
 
 - **Content**: root `Cargo.toml` (virtual workspace), `crates/{memorybank,engine,store,llm}`, `rustfmt.toml`, clippy lints, CI script.
-- **Design**: workspace members; features: `store/sqlite` (default), `store/postgres` (later); `llm/http`.
+- **Design**: workspace members; `llm/http` feature; `store` ships SQLite only.
 - **Acceptance**: `cargo check/clippy/fmt --workspace` all green; `cargo tree` shows no reverse dependencies (engine does not depend on store/llm).
 - **Tests**: CI runs `cargo test --workspace`.
 
@@ -254,7 +256,7 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
 
 ## P0-10 Migration Runner + Test DB Helper
 
-**Status**: ❌
+**Status**: ✅ (2026-10-26)
 
 - **Content**: `store::migrate(&SqlitePool)`; `store::testing::memory_pool()`.
 - **Acceptance**: migrations are idempotent (run twice); each test database is isolated.
@@ -774,7 +776,7 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
 
 ## P5-1 PG Migration + Adapter
 
-**Status**: ❌
+**Status**: ❌ (deferred — SQLite only for now; revisit when a second backend is needed)
 
 - **Design**: a separate `postgres` module (sqlx::Postgres), jsonb/timestamptz mapping; `vector` type as an optional feature; dialect differences isolated in the module.
 - **Acceptance**: two implementations of the same trait; contract tests pass.
@@ -782,7 +784,7 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
 
 ## P5-2 Dual-Backend Store Contract Tests
 
-**Status**: ❌
+**Status**: ❌ (deferred — depends on P5-1)
 
 - **Design**: `store::testing::contract(factory: impl BackendFactory)`, covering method semantics (claim atomicity, conflict skip, adjacency merging, statistics maintenance).
 - **Acceptance**: both backends green.

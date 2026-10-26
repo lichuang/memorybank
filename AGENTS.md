@@ -6,7 +6,9 @@ Guidance for AI coding agents working in this repository. Humans are welcome to 
 
 `memorybank` — a Rust implementation of the agent memory system from the paper **Hindsight Is 20/20: Building Agent Memory that Retains, Recalls, and Reflects** (`docs/hindsight.pdf`): four memory networks (world / experience / opinion / observation), three operations (retain / recall / reflect), TEMPR retrieval and CARA reflection.
 
-**Status**: the design phase is complete; implementation has not started (P0 pending).
+**Status**: design complete; implementation in progress (P0: 10/12). Storage is **SQLite-only** for now — the PostgreSQL adapter is deferred.
+
+**Storage scope**: only SQLite is implemented. There is no `postgres` feature, module, or migration in the codebase today; the `Store` contract and the logical schema stay backend-neutral so PostgreSQL can be added later without engine changes. Revisit when a second backend is actually needed.
 
 Design docs (read in this order):
 
@@ -24,7 +26,7 @@ memorybank/                 # workspace root (virtual manifest; no root package)
 ├── crates/
 │   ├── memorybank/         # facade: public API + wiring
 │   ├── engine/             # domain types + ports + retain/recall/reflect orchestration
-│   ├── store/              # Store implementation (SQLite by default, PostgreSQL later)
+│   ├── store/              # Store implementation (SQLite)
 │   └── llm/                # Llm / Embedder providers (HTTP-compatible + optional local adapters)
 ├── design/                 # design documents (three files)
 └── docs/                   # the paper
@@ -95,7 +97,7 @@ These are settled design decisions. Do not deviate silently:
 - Each test gets its own in-memory SQLite database (`store::testing::memory_pool()`); no shared state.
 - **No network calls in unit tests**; tests against real providers use mocks (wiremock) or are explicitly `#[ignore]`d.
 - Assertions about time, randomness, and IDs must be controllable (inject `Clock`; assert semantics, not literal values).
-- From P5-2 onward: run the same `Store` contract suite against both SQLite and PostgreSQL.
+- When a second backend lands (P5-2, currently deferred), run the same `Store` contract suite against both SQLite and PostgreSQL.
 
 ## 8. Key invariants (implementation self-check)
 

@@ -73,6 +73,8 @@ The specific decisions in §0 are **instances** of these criteria; retired const
 
 Foreign keys are annotated `→ table.column`. Every table carries `created_at`/`updated_at` (not repeated below; listed explicitly only where the column's semantics need emphasis).
 
+> **Implementation scope**: the "Relational mapping example" column shows the target mapping (PostgreSQL-flavored) for portability; it is **not implemented yet**. The only storage backend today is SQLite, which uses the `TEXT` / `INTEGER` (epoch ms) / `BLOB` forms from the embedded column.
+
 ## 3. Table Inventory (7 Core Tables)
 
 ### 3.1 `bank` — Memory Bank Container + Agent Profile

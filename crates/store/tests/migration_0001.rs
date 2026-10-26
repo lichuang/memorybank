@@ -1,21 +1,11 @@
 //! Migration 0001: table inventory, constraints, and the FTS index.
 
 use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
-
-const MIGRATION: &str = include_str!("../migrations/sqlite/0001_init.sql");
 
 async fn pool() -> SqlitePool {
-  let pool = SqlitePoolOptions::new()
-    .max_connections(1)
-    .connect("sqlite::memory:")
+  store::testing::memory_pool()
     .await
-    .expect("open in-memory sqlite");
-  sqlx::raw_sql(MIGRATION)
-    .execute(&pool)
-    .await
-    .expect("apply migration 0001");
-  pool
+    .expect("open migrated in-memory database")
 }
 
 async fn seed_bank(pool: &SqlitePool) {

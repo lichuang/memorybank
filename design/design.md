@@ -22,7 +22,7 @@ memorybank/                    # workspace root (virtual manifest; no root packa
 │   │   ├── observe/           # observation synthesis + GC (work-list derivation)
 │   │   ├── resolve/           # entity resolution ρ
 │   │   └── link/              # temporal / semantic / causal link construction
-│   ├── store/                 # sqlx: SQLite (default) / PostgreSQL (feature gate)
+│   ├── store/                 # sqlx: SQLite adapter
 │   └── llm/                   # HTTP-compatible provider + optional local adapters
 ├── design/                    # design documents (three files)
 └── docs/                      # the paper
@@ -32,10 +32,12 @@ memorybank/                    # workspace root (virtual manifest; no root packa
 |---|---|---|
 | `memorybank` (facade, `crates/memorybank`) | Facade: wires ports + public API + builders; the only direct dependency for users | engine + store + llm |
 | `engine` | Domain types, port definitions, retain/recall/reflect orchestration | No concrete backend/model |
-| `store` | Implements `Store` (SQLite/PG; indexes and query dialects converge here) | engine (ports) |
+| `store` | Implements `Store` on SQLite (query dialects stay here) | engine (ports) |
 | `llm` | Implements `Llm` / `Embedder` (OpenAI-compatible HTTP) | engine (ports) |
 
 Dependency direction is fixed at **facade → engine ← adapters**; engine never depends on an adapter in reverse. Users may implement any port themselves (custom storage, local models) to replace the default adapters.
+
+> **Backend scope (current): SQLite only.** PostgreSQL (and pgvector) is deliberately deferred: there is no `postgres` feature, module, or migration today. The logical schema and the `Store` contract stay backend-neutral so a second adapter can be added later without touching the engine; revisit when multi-backend deployment or a read-only serving replica is actually needed.
 
 ## 1. Ports (Interface Contracts)
 
@@ -217,7 +219,7 @@ rescan(): pending_work → re-chunk / re-extract (stale extracting judged by upd
 
 1. **Deterministic fakes**: `FakeLlm` (returns fixed structured output per input), `HashEmbedder` (deterministic character-hash vectors), `IdentityReranker` — the pipeline is testable end to end.
 2. **Real SQLite**: an isolated in-memory database per test + migrations; covers idempotency (re-ingest/incremental/crash recovery), transaction rollback, and the two-row invariant.
-3. **Contract tests**: the same behavioral suite for `Store` runs against both SQLite and PG (test kit in the `store` crate).
+3. **Contract tests**: the same behavioral suite for `Store` runs against both SQLite and PG (test kit in the `store` crate); the PG half is deferred until P5-2.
 4. **Evaluation (deferred)**: LongMemEval / LoCoMo harness with real models (P5).
 
 ## 5. Phasing

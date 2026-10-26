@@ -6,8 +6,8 @@
 //!   IDs and never reads the wall clock; creation DTOs carry `id` and
 //!   `created_at`, and methods that need "now" take it as a parameter.
 //! - **No backend types leak.** Only domain types, `std::time::Duration`, and
-//!   primitives cross this boundary, so SQLite and PostgreSQL adapters share one
-//!   contract.
+//!   primitives cross this boundary, so a second backend can implement the same
+//!   contract without changing the engine.
 
 use std::time::Duration;
 
