@@ -24,3 +24,8 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

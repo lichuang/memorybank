@@ -6,7 +6,7 @@ Guidance for AI coding agents working in this repository. Humans are welcome to 
 
 `memorybank` — a Rust implementation of the agent memory system from the paper **Hindsight Is 20/20: Building Agent Memory that Retains, Recalls, and Reflects** (`docs/hindsight.pdf`): four memory networks (world / experience / opinion / observation), three operations (retain / recall / reflect), TEMPR retrieval and CARA reflection.
 
-**Status**: design complete; implementation in progress (P0: 10/12). Storage is **SQLite-only** for now — the PostgreSQL adapter is deferred.
+**Status**: design complete; **P0 complete** (12/12), P1 in progress. Storage is **SQLite-only** for now — the PostgreSQL adapter is deferred.
 
 **Storage scope**: only SQLite is implemented. There is no `postgres` feature, module, or migration in the codebase today; the `Store` contract and the logical schema stay backend-neutral so PostgreSQL can be added later without engine changes. Revisit when a second backend is actually needed.
 

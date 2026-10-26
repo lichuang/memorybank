@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 11/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (11/66 total)**
+> Current progress: **P0 12/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (12/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -281,10 +281,11 @@ pub struct FixedClock(pub Timestamp);
 
 ## P0-12 P0 Smoke Test
 
-**Status**: ❌
+**Status**: ✅ (2026-10-26)
 
 - **Content**: bank→source→chunks→claim/release integration test.
-- **Acceptance**: all green; `cargo doc` has no broken links.
+- **Scope note**: P0 has no `Store` implementation yet (it starts at P1-3), so the smoke test drives the same flow with runtime SQL against the migrated schema; the port-level version arrives with P1-3/P1-4. Covered: atomic claim, stale reclaim boundary, release back to `pending`, and rollback leaving no partial products.
+- **Acceptance**: all green; `cargo doc` has no broken links (CI runs it with `RUSTDOCFLAGS=-D warnings`).
 - **Tests**: `crates/store/tests/smoke.rs`.
 
 ---
