@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 10/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (10/66 total)**
+> Current progress: **P0 11/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (11/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -264,7 +264,7 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
 
 ## P0-11 Fakes
 
-**Status**: ❌
+**Status**: ✅ (2026-10-26)
 
 - **Content**: deterministic test doubles.
 - **Design**:
