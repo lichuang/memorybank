@@ -122,6 +122,8 @@ Index: (bank_id, status) (rescan finds sources awaiting chunking). A client rese
 | `created_at` | `TS` | chunk persistence time (written by tx1) — listed explicitly to anchor the chunk clock (`updated_at` remains implicit per the global convention and is refreshed on claim/status flips) |
 | `time_start` / `time_end` | `TS` nullable | conversation-clock interval covered by this chunk (available when the caller provides turn timestamps); facts without their own time may default `mentioned_at` from this |
 
+Index: `(bank_id, source_id)` serves per-source progress aggregation (`retain_status`) and source-scoped cleanup (migration `0002`).
+
 Chunking strategy (configuration): when the caller provides session/turn metadata, **session alignment first**; plain documents fall back to fixed windows (e.g. 2–4k tokens). Each chunk is coarsely extracted into 2–5 narrative facts (paper §4.1.2). Chunking is deterministic pure-memory code (reading the persisted payload) and can be re-run after any crash. Chunking parameters are runtime configuration and are not persisted (boundary reproduction relies on deployment-side configuration).
 
 ### 3.4 `fact` — Fact Row (unified four-network table, core table)
@@ -238,16 +240,18 @@ Key points:
 
 ```
 ① tx0 receive: caller payload → canonical text → insert source (payload_text, status=received)
-        ── ack may be returned here (async contract) or processing continues synchronously
-② chunking (deterministic pure-memory code reading the persisted payload; survives any crash)
+② chunking (deterministic pure-memory code over the normalized payload; turn spans are still in memory)
    tx1: insert all chunk rows (text + content_hash + status=pending)
         each row ON CONFLICT(bank_id, content_hash) → skip (material already in bank)
         + source.status → chunked (same transaction)
-③ per-chunk extraction (synchronous or worker-driven):
-   outside the transaction: LLM extraction / Assess / embedding, etc.
+   ── ack: retain returns the source id here (async contract; no model work has run yet)
+③ per-chunk extraction (worker-driven; model calls outside the transaction):
+   claim: pending→extracting (atomic; updated_at is the claim token)
+   LLM extraction / Assess / embedding, etc.
    tx2: all fact products of the chunk (fact (embedding written inline) + fact_entity
-        + entity + fact_link + confidence deltas on existing opinions) + chunk.status pending→done
-        (atomic claim: UPDATE … WHERE status='pending'; zero rows affected ⇒ someone else finished → abort)
+        + entity + fact_link + confidence deltas on existing opinions) + chunk.status extracting→done,
+        guarded by the claim token (zero rows updated ⇒ the claim was lost to a stale-steal →
+        abort and write nothing)
 ④ rescan (startup/periodic):
    source.status=received → re-run chunking (tx1)
    chunk.status=pending, or extracting whose updated_at is stale → re-run ③
@@ -258,7 +262,7 @@ Key points:
 |---|---|---|---|
 | Receive | before tx0 commits | caller resends (the only irreducible window: the database never received the bytes) | tx0 atomic; on resend, old payload is skipped by hash and a new zero-chunk source row remains |
 | Chunking | before/after tx1 | rescan re-chunks | chunk hash unique index; conflict = skip |
-| Extraction | outside the transaction (model calls) or during tx2 | chunk stays pending/extracting; rescan re-runs | atomic status claim + whole-transaction rollback; α deltas live inside the transaction and are never applied twice |
+| Extraction | outside the transaction (model calls) or during tx2 | chunk stays pending/extracting; rescan re-runs | atomic status claim + whole-transaction rollback; tx2 is guarded by the claim token, so a stale-steal loser writes nothing; α deltas live inside the transaction and are never applied twice |
 
 **Cross-source shared chunk semantics**: when a later source matches all chunk hashes, it becomes a "zero-chunk source row" (the ledger records "seen"; no duplicate chunk, no copied text, no re-extraction).
 
@@ -329,8 +333,8 @@ Scheduling principle: implement what is in the paper first. Three tiers — **A 
 
 ### Tier B · Operational Necessities (inbox/idempotency/recovery; minimal form for the first version)
 
-7. Receive contract for the first version: **synchronous** (retain blocks until all chunks of this call are done); tx0-ack/async-worker mode deferred.
-8. Observation synthesis scheduling and GC: scheduling is a runtime concern (in-memory queue or periodic sweep; work list derived from in-database state — entity evidence-change comparison); the first version may synthesize synchronously inside retain and may skip GC; schedules lost on crash converge via sweep.
+7. Receive contract: **asynchronous ack** — `retain` normalizes, runs tx0 + tx1, and returns the `SourceId`; a worker performs extraction. Progress is queried per source id and derived from source/chunk state (`received` / `queued` / `running` / `stalled` / `completed` / `completed_with_failures` / `failed`). Caller-supplied idempotency keys (safe resend) remain deferred.
+8. Observation synthesis scheduling and GC: scheduling is a runtime concern (in-memory queue or periodic sweep; work list derived from in-database state — entity evidence-change comparison); the first version may synthesize inside the worker pass and may skip GC; schedules lost on crash converge via sweep.
 
 ### Tier C · Out of Paper Scope (deferred)
 

@@ -159,18 +159,25 @@ Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 
 ```
 ingest(payload):
-  canonical text → tx0: create_source
-  chunking (session-alignment first / window fallback) → tx1: append_chunks (hash conflicts skipped)
-  [sync mode] process this call's pending chunks immediately; [async mode] hand off to a worker
-worker loop:
-  claim_chunk → extract (Llm, A.1/A.5.1) → resolve (Store) → embed (Embedder)
+  canonical text + turn spans (in memory)
+  tx0: create_source (payload_text, status=received)
+  chunking (session-alignment first / window fallback; spans still in memory)
+  tx1: append_chunks (hash conflicts skipped) + source.status=chunked
+  ── ack: return SourceId (durably queued; no model work has run yet)
+worker loop (required for processing, one-shot `rescan` in tests):
+  claim_chunk (pending→extracting; updated_at = claim token)
+             → extract (Llm, A.1/A.5.1) → resolve (Store) → embed (Embedder)
              → build links (link module) → reinforce (Assess + confidence deltas)
-             → commit_chunk (tx2)   // on failure: release_chunk, back to pending
-rescan(): pending_work → re-chunk / re-extract (stale extracting judged by updated_at age)
+             → commit_chunk (tx2, guarded by the claim token)
+  // on failure: release_chunk, back to pending (or failed per retry policy)
+rescan(): received sources → re-chunk; pending / stale-extracting chunks → re-run extraction
+status: aggregate chunk state per source id (no progress table, no new column)
 ```
 
 - All model calls (extraction/Assess/embedding) happen **outside** tx2; tx2 is pure database writes.
-- The first version defaults to **synchronous** (`retain` blocks until this call's chunks are done, schema §7.B#7); worker/rescan are separate APIs.
+- `retain` is an **async ack** API: it returns the `SourceId` after tx1, so ack means "durably queued", not "done". Failures before the ack are returned as errors; failures after it are visible only through `retain_status` (`CompletedWithFailures` / `Failed`).
+- Chunking happens **before** the ack on purpose: the normalized turn spans are still in memory, so acking after tx1 avoids losing session alignment on a crash between tx0 and tx1.
+- A running worker is required to make progress; notifications are best-effort and the periodic sweep guarantees convergence after a lost wake-up.
 
 ### 2.2 recall (Four Channels → RRF → Rerank → Budget)
 
@@ -236,7 +243,7 @@ rescan(): pending_work → re-chunk / re-extract (stale extracting judged by upd
 ## 6. Open Items
 
 1. ~~`Store` shape: single trait (current draft) vs capability sub-traits (read/write/maintenance) — settle in P0.~~ **Resolved in P0-8**: single trait; the split trigger and the proposed read/write/maintenance cut are recorded in §1.
-2. Whether retain's default API is synchronous or asynchronous (schema §7.B#7 recommends synchronous first).
+2. ~~Whether retain's default API is synchronous or asynchronous (schema §7.B#7 recommends synchronous first).~~ **Resolved**: async ack — `retain` returns the `SourceId` after tx0+tx1; a worker processes chunks; progress is queried per source.
 3. First implementations of reranker / temporal parser (identity stub + rule-based parser first; model-based versions deferred).
 4. Tokenization for chunking and the budget estimator (do we reuse the embedding model's tokenizer?).
 5. Evaluation integration timing and harness shape (P5).

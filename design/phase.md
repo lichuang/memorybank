@@ -9,7 +9,7 @@ Based on `design.md` (implementation design) and `memory-schema.md` (finalized l
 
 ## Common Conventions (apply to every step; not repeated below)
 
-- **Async**: ports and orchestration are all `async` (`async-trait`); retain's "synchronous semantics" means `.await` until this call's chunks are all done — it does not block a thread.
+- **Async**: ports and orchestration are all `async` (`async-trait`); retain is an **async ack** API — it normalizes, persists the source + chunks (tx0/tx1), and returns the `SourceId`; extraction runs in the worker and progress is polled by source id.
 - **Errors**: `engine::Error` (Retryable/Fatal/Config/NotFound/Conflict); workers retry only Retryable; tests may use `anyhow` helpers.
 - **IDs**: UUIDv7, allocated in **engine before the transaction** (`FactId::new()`); `Store` only persists them — avoiding the backtracking dependency of "insert before you get an id".
 - **Testing**: unit tests beside the module; integration tests in `crates/*/tests/`; all time goes through an injected `Clock`; an isolated in-memory SQLite database per test.
@@ -494,44 +494,62 @@ pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
 - **Acceptance**: no residual rows after failure; after success, facts/edges/statistics are consistent.
 - **Tests**: inject failure (e.g. FTS unique conflict) and verify full rollback; replaying the same commit is rejected (status already done).
 
-## P1-17 retain API (Synchronous Semantics)
+## P1-17 retain API (Async Ack) + Status Query
 
 **Status**: ❌
 
-- **Content**: facade method.
+- **Content**: facade ingest entry point + per-source progress query.
 - **Design**:
 ```rust
-pub struct RetainOptions { pub wait_until_done: bool }   // v1 always true
-pub struct RetainReport { pub source_id: SourceId, pub chunks_total: usize,
-                          pub chunks_skipped: usize, pub facts_written: usize }
-impl MemoryBank { pub async fn retain(&self, bank:BankId, payload:RawPayload, opts:RetainOptions) -> Result<RetainReport> }
+pub async fn retain(&self, bank: BankId, payload: RawPayload) -> Result<SourceId>;
+pub async fn retain_status(&self, bank: BankId, source: SourceId) -> Result<RetainStatus>;
+
+pub struct RetainStatus {
+  pub state: RetainState,
+  pub chunks_total: usize, pub chunks_pending: usize, pub chunks_extracting: usize,
+  pub chunks_done: usize, pub chunks_failed: usize, pub facts_written: usize }
+pub enum RetainState { Received, Queued, Running, Stalled, Completed,
+                       CompletedWithFailures, Failed }
 ```
-- **Acceptance**: on return, this call's chunks are all done (or skipped); error classes propagated with context.
-- **Tests**: end-to-end (fake LLM/embedder) produces the expected fact count.
+- **Semantics**: `retain` normalizes → tx0 (source `received`) → chunking (spans still in memory) → tx1 (chunks `pending`, source `chunked`) → returns `SourceId`. Ack means "durably queued", not "done": model work starts only in the worker. Errors before the ack are returned directly; failures after it surface through `retain_status` (`CompletedWithFailures` / `Failed`).
+- **Status derivation** (no progress table, no new column): aggregate `chunk` rows by `source_id`; `Stalled` = an `extracting` row with `now - updated_at > stale_after`; `total = 0` (all hashes collided) counts as `Completed`; unknown source → `NotFound`.
+- **Store support**: `Store::source_progress(bank, source)` returning the counts (`None` when unknown) + migration `0002` adding `chunk(bank_id, source_id)` for the aggregation.
+- **Acceptance**: `retain` returns with `source.status=chunked` and all chunk rows visible but zero facts; `retain_status` matches chunk states at every boundary; without a worker the state stays `Queued/Running` until `rescan`; re-ingest of identical material yields a zero-chunk source in `Completed`.
+- **Tests**: ack point (source+chunks exist, no facts); status transitions with `FixedClock`; zero-chunk source; unknown source; `CompletedWithFailures` after a dead-letter chunk.
 
 ## P1-18 worker + rescan
 
 **Status**: ❌
 
-- **Content**: driven by derived work lists.
+- **Content**: background processing driven by derived work lists.
 - **Design**:
 ```rust
-pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usize, pub failed: usize }
-impl MemoryBank { pub async fn rescan(&self, bank:BankId) -> Result<RescanReport>;
-                  pub fn spawn_worker(&self, cfg:WorkerConfig) -> JoinHandle<()>; }
+pub struct WorkerConfig { pub concurrency: usize, pub poll_interval: Duration,
+  pub stale_after: Duration, pub max_attempts: u32, pub retry_delay: Duration }
+impl MemoryBank {
+  pub fn spawn_worker(&self, cfg: WorkerConfig) -> JoinHandle<()>;   // rescan loop + sleep
+  pub async fn rescan(&self, bank: BankId) -> Result<RescanReport>;  // one deterministic pass
+}
+pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usize,
+                          pub failed: usize }
 ```
-- **Acceptance**: status=received sources are re-chunked; pending/stale-extracting chunks are re-run; failed is not retried automatically (ops reset).
-- **Tests**: simulate interruption (manually set status), then rescan converges.
+- **Semantics**: `retain` sends a best-effort wake-up to a running worker; the periodic `poll_interval` sweep makes a lost notification harmless (converges after a crash). `rescan` is a single pass and is what tests call to avoid sleeps. `failed` chunks are not retried automatically (ops reset).
+- **Acceptance**: after `retain` + one `rescan` pass every chunk reaches `done`; stale `extracting` rows are reclaimed; `failed` rows stay put; a worker started with a long interval still converges via the periodic sweep.
+- **Tests**: simulate interruption by setting statuses manually, then one rescan converges; worker loop drains a queued source without manual rescan.
 
 ## P1-19 retain Integration Tests
 
 **Status**: ❌
 
-- **Content**: end-to-end matrix.
+- **Content**: end-to-end matrix for the async contract.
 - **Acceptance/Tests**:
-  - re-ingest idempotency (zero new facts); incremental re-ingest (only new chunks processed);
+  - ack semantics: `retain` returns `SourceId` with chunks present and **zero facts**; `retain_status = Queued`;
+  - after one `rescan` pass (no sleeps): `retain_status = Completed` and the expected facts/entities/links exist;
+  - re-ingest idempotency (zero new facts; zero-chunk source in `Completed`); incremental re-ingest (only new chunks processed);
   - interrupted extraction → rescan recovers; tx2 failure → no partial state;
-  - two-row invariant (SQL asserts count=2); entity statistics match bindings.
+  - stale claim reclaimed without double-committing (claim-token CAS);
+  - two-row invariant (SQL asserts count=2); entity statistics match bindings;
+  - `CompletedWithFailures` when a chunk is dead-lettered.
 
 ---
 
