@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 0/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (12/66 total)**
+> Current progress: **P0 12/12 · P1 1/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (13/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -171,7 +171,7 @@ pub struct EntityStatUpdate { pub entity_id: EntityId, pub add: bool, pub at: Op
   pub updated_at: Timestamp }
 pub struct OpinionConfidenceUpdate { pub opinion_id: FactId, pub new_confidence: f32,
   pub new_text: Option<String>, pub updated_at: Timestamp }
-pub struct ChunkCommit { pub chunk_id: ChunkId, pub completed_at: Timestamp,
+pub struct ChunkCommit { pub chunk_id: ChunkId, pub claimed_at: Timestamp, pub completed_at: Timestamp,
   pub facts: Vec<NewFact>, pub entities: Vec<Entity>, pub bindings: Vec<NewBinding>,
   pub links: Vec<NewLink>, pub entity_stats: Vec<EntityStatUpdate>,
   pub opinion_updates: Vec<OpinionConfidenceUpdate> }
@@ -294,7 +294,7 @@ pub struct FixedClock(pub Timestamp);
 
 ## P1-1 Payload Normalization
 
-**Status**: ❌
+**Status**: ✅ (2026-10-27)
 
 - **Content**: turn caller input into canonical text + a turn view.
 - **Design**:
@@ -303,10 +303,14 @@ pub struct RawTurn { pub speaker: String, pub text: String, pub at: Option<Times
 pub enum RawPayload { Transcript { title: Option<String>, turns: Vec<RawTurn> }, Document { title: Option<String>, text: String } }
 pub struct TurnSpan { pub byte_start: usize, pub byte_end: usize, pub at: Option<Timestamp>, pub session: Option<u32> }
 pub struct NormalizedPayload { pub text: String, pub spans: Vec<TurnSpan> }
-pub fn normalize(p: RawPayload) -> NormalizedPayload   // "[<ts>] <speaker>: <text>\n"
+impl RawPayload { pub fn title(&self) -> Option<&str> }   // retained for the source row
+pub fn normalize(p: RawPayload) -> NormalizedPayload
+// transcript line: "[<ts>] <speaker>: <text>\n"; the [<ts>] prefix is omitted when `at` is None
+// <ts> = RFC3339 UTC with millisecond precision, e.g. 2024-06-09T12:00:00.000Z
 ```
-- **Acceptance**: Document passes through untouched; Transcript preserves time/session markers; spans are invertible (slice == turn text).
-- **Tests**: empty turns, CJK, extremely long single turn.
+- **Span contract**: `byte_start..byte_end` covers **only the turn text** (not `[ts] speaker: `, not the trailing `\n`), so `&normalized.text[start..end] == turn.text`. Sessions live in `TurnSpan.session` only (not in the text); after a crash between tx0 and tx1, rescan re-chunks from `payload_text` with window fallback (accepted, see `memory-schema.md` §5.1).
+- **Acceptance**: Document passes through byte-for-byte (empty spans); Transcript keeps timestamps in text and sessions in spans; spans are invertible; no time is fabricated when `at` is `None`.
+- **Tests**: empty turns, CJK (byte offsets, not chars), extremely long single turn, multi-line turn text, missing timestamp, title accessor.
 
 ## P1-2 Chunker
 
@@ -345,18 +349,21 @@ pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256
 
 **Status**: ❌
 
-- **Content**: atomic claim + stale reclaim.
+- **Content**: atomic claim + stale reclaim + monotonic claim token.
 - **Design**:
 ```sql
-UPDATE chunk SET status='extracting', updated_at = ?1
-WHERE id = (SELECT id FROM chunk WHERE bank_id=?2 AND status='pending'
-            ORDER BY created_at LIMIT 1)
-  AND status='pending'
+UPDATE chunk SET status='extracting',
+                 updated_at = MAX(?now, updated_at + 1)   -- strictly monotonic claim token
+WHERE id = (SELECT id FROM chunk
+            WHERE bank_id=?bank
+              AND (status='pending'
+                   OR (status='extracting' AND updated_at < ?stale_before))
+            ORDER BY created_at, id LIMIT 1)
 RETURNING *;
--- stale reclaim: UPDATE chunk SET status='pending' WHERE status='extracting' AND updated_at < ?old
+-- PG dialect would use GREATEST instead of MAX
 ```
-- **Acceptance**: with two concurrent workers only one claims; stale extracting rows are reset.
-- **Tests**: 10 concurrent claims, only 1 succeeds; reset after time rewind.
+- **Acceptance**: with two concurrent workers only one claims; stale `extracting` rows are reclaimed; each claim's `updated_at` is strictly greater than the previous one (even under `FixedClock`), so it can serve as the tx2 claim token.
+- **Tests**: 10 concurrent claims, only 1 succeeds; reset after time rewind; two claims in the same millisecond get distinct tokens.
 
 ## P1-6 `release_chunk`
 
@@ -489,10 +496,10 @@ pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
 
 **Status**: ❌
 
-- **Content**: commit every product in one transaction.
-- **Design**: insert order entity→fact→fact_entity→fact_link→FTS→stat updates→opinion updates→chunk.status=done; any failure rolls back.
-- **Acceptance**: no residual rows after failure; after success, facts/edges/statistics are consistent.
-- **Tests**: inject failure (e.g. FTS unique conflict) and verify full rollback; replaying the same commit is rejected (status already done).
+- **Content**: commit every product in one transaction, guarded by the claim token.
+- **Design**: insert order entity→fact→fact_entity→fact_link→FTS→stat updates→opinion updates; then flip `chunk.status=done` with `WHERE id=? AND status='extracting' AND updated_at=?claimed_at`; 0 rows updated ⇒ the claim was lost to a stale-steal ⇒ return `Error::Conflict` and write nothing. Any failure rolls back.
+- **Acceptance**: no residual rows after failure; after success, facts/edges/statistics are consistent; a second committer with an outdated `claimed_at` is rejected and leaves no rows.
+- **Tests**: inject failure (e.g. FTS unique conflict) and verify full rollback; replaying the same commit is rejected (status already done); stale-steal loser rejected.
 
 ## P1-17 retain API (Async Ack) + Status Query
 

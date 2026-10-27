@@ -288,6 +288,11 @@ pub struct OpinionConfidenceUpdate {
 pub struct ChunkCommit {
   /// Chunk being completed.
   pub chunk_id: ChunkId,
+  /// Claim token: the `updated_at` value written by [`Store::claim_chunk`].
+  ///
+  /// The status flip is conditional on it, so a worker whose claim was stolen by
+  /// a stale reclaim cannot commit (the store returns `Error::Conflict`).
+  pub claimed_at: Timestamp,
   /// When the chunk reached `done` (also the chunk's `updated_at`).
   pub completed_at: Timestamp,
   /// Fact rows produced by extraction.
@@ -542,6 +547,7 @@ mod tests {
 
     let commit = ChunkCommit {
       chunk_id,
+      claimed_at: now,
       completed_at: now,
       facts: vec![NewFact {
         id: fact_id,
