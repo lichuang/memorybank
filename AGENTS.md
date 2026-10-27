@@ -54,6 +54,13 @@ cargo doc --workspace --no-deps
 
 ## 4. Workflow
 
+> **Do not modify anything without explicit permission.** Answering questions,
+> reading files, searching the code, and proposing plans are allowed. Do not
+> create, edit, or delete code, tests, docs, dependencies, or run state-changing
+> commands until the human explicitly asks for that change (e.g. "implement",
+> "fix", "add", "remove", "rename"). Questions such as "should we…?" or "what
+> would you do?" are discussion requests, not instructions to act.
+
 1. **One task at a time**, taken from `design/phase.md` in phase order (P0 first).
 2. Read the task's Content / Design / Acceptance / Tests sections first. If the design must change, update the design docs **before** the code (see §6).
 3. When done:

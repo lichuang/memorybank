@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 1/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (13/66 total)**
+> Current progress: **P0 12/12 · P1 2/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (14/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -314,19 +314,21 @@ pub fn normalize(p: RawPayload) -> NormalizedPayload
 
 ## P1-2 Chunker
 
-**Status**: ❌
+**Status**: ✅ (2026-10-27)
 
 - **Content**: session alignment + window fallback + hashing.
 - **Design**:
 ```rust
-pub struct ChunkConfig { pub session_gap: Duration, pub max_tokens: usize, pub min_tokens: usize, pub estimator: TokenEstimatorKind }
+pub struct ChunkConfig { pub session_gap: Duration, pub max_tokens: usize, pub min_tokens: usize }
 pub struct RawChunk { pub index: u32, pub text: String, pub content_hash: String,
                       pub time_start: Option<Timestamp>, pub time_end: Option<Timestamp> }
 pub fn chunk(p: &NormalizedPayload, cfg: &ChunkConfig, est: &dyn TokenEstimator) -> Vec<RawChunk>
-pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256
+pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256 (lowercase hex)
+// TokenEstimator + CharHeuristic live in engine::tokens (shared with P2-7)
 ```
-- **Acceptance**: deterministic (same input, same output); never emits empty chunks; oversized sessions are window-split without crossing "obvious session boundaries".
-- **Tests**: multiple sessions, one oversized turn, whitespace-only differences hash equal.
+- **Boundary rules**: chunks cut only at turn/line boundaries; a turn larger than `max_tokens` is split at UTF-8 char boundaries; a chunk below `min_tokens` merges into the previous chunk when it still fits `max_tokens` (may cross a session boundary); documents use pure windows; every chunk is a verbatim slice, whitespace-only pieces are dropped; `time_start/time_end` are the min/max turn times covered.
+- **Acceptance**: deterministic; never empty; oversized sessions split without crossing turn boundaries; whitespace-only hash differences collapse.
+- **Tests**: sessions by id and by gap, oversized session, oversized turn, CJK windows, small-chunk merge, determinism, empty inputs, hash normalization.
 
 ## P1-3 `create_source` (tx0)
 
