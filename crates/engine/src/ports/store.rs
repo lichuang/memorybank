@@ -35,7 +35,13 @@ pub trait Store: Send + Sync {
   async fn create_source(&self, source: Source) -> Result<()>;
 
   /// Persists chunk rows for a source (tx1), skipping any whose
-  /// `(bank_id, content_hash)` already exists. Returns the inserted count.
+  /// `(bank_id, content_hash)` already exists, and advances the source to
+  /// `chunked` in the same transaction. Returns the inserted count.
+  ///
+  /// Every chunk must belong to `source` and to the source's bank; a mismatch is
+  /// an [`crate::Error::Config`]. The source's `updated_at` becomes the latest
+  /// `created_at` in the batch; an empty batch leaves it unchanged (there is
+  /// still a status flip).
   async fn append_chunks(&self, source: SourceId, chunks: Vec<NewChunk>) -> Result<usize>;
 
   /// Atomically claims one chunk for extraction and reclaims stale

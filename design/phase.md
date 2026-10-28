@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 3/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (15/66 total)**
+> Current progress: **P0 12/12 · P1 4/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (16/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -341,12 +341,12 @@ pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256 (lo
 
 ## P1-4 `append_chunks` (tx1)
 
-**Status**: ❌
+**Status**: ✅ (2026-10-28)
 
 - **Content**: batch insert + conflict skip + source status advance.
-- **Design**: `INSERT … ON CONFLICT(bank_id,content_hash) DO NOTHING`; same transaction `UPDATE source SET status='chunked'`.
-- **Acceptance**: when every chunk conflicts, 0 rows are inserted but the source still becomes chunked (zero-chunk ledger row).
-- **Tests**: same-source double ingest; identical content across sources; partial conflicts.
+- **Design**: `INSERT … ON CONFLICT(bank_id, content_hash) DO NOTHING` per row inside one transaction; the same transaction runs `UPDATE source SET status='chunked', updated_at=COALESCE(?, updated_at)` where the parameter is the **latest `created_at` in the batch** (option A; an empty batch keeps the old value). Chunks whose `source_id` differs from the argument are rejected with `Error::Config` before any write; inside the transaction the source's `bank_id` is read and every chunk must match it (`Error::Config` otherwise, schema §3.3). A missing source returns `NotFound` and nothing is written; any mid-batch failure rolls the whole transaction back.
+- **Acceptance**: when every chunk conflicts, 0 rows are inserted but the source still becomes `chunked` (zero-chunk ledger row); a failed append leaves no chunk rows and leaves the source status untouched.
+- **Tests**: same-source double ingest; identical content across sources (surviving row belongs to the first source); partial conflicts; empty batch; missing source; mismatched source id; mismatched bank id; verbatim field round-trip; mid-batch failure rollback.
 
 ## P1-5 `claim_chunk`
 

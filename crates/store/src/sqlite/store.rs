@@ -126,8 +126,82 @@ impl Store for SqliteStore {
 
   // —— Not implemented yet (P1-4 onward) ——
 
-  async fn append_chunks(&self, _source: SourceId, _chunks: Vec<NewChunk>) -> Result<usize> {
-    Err(not_implemented("append_chunks"))
+  async fn append_chunks(&self, source: SourceId, chunks: Vec<NewChunk>) -> Result<usize> {
+    if chunks.iter().any(|chunk| chunk.source_id != source) {
+      return Err(Error::config(
+        "append_chunks: every chunk must belong to the given source",
+      ));
+    }
+
+    // Option A: derive `source.updated_at` from the batch instead of taking a
+    // clock reading. An empty batch (nothing to derive from) keeps the old value.
+    let updated_at = chunks.iter().map(|chunk| chunk.created_at).max();
+    let mut tx = self
+      .pool
+      .begin()
+      .await
+      .map_err(|error| map_write_error("chunk", error))?;
+
+    // The source must exist and own the batch's bank (schema §3.3).
+    let stored_bank: Option<String> = sqlx::query_scalar("SELECT bank_id FROM source WHERE id = ?")
+      .bind(source.to_string())
+      .fetch_optional(&mut *tx)
+      .await
+      .map_err(|error| map_read_error("source", error))?;
+    let stored_bank = stored_bank.ok_or_else(|| Error::not_found("source", source.to_string()))?;
+    let bank_id = BankId::parse(&stored_bank)
+      .map_err(|error| Error::fatal(format!("corrupt bank id `{stored_bank}`: {error}")))?;
+
+    if chunks.iter().any(|chunk| chunk.bank_id != bank_id) {
+      // Dropping `tx` rolls back (nothing has been written yet).
+      return Err(Error::config(
+        "append_chunks: every chunk must belong to the source's bank",
+      ));
+    }
+
+    let mut inserted = 0_usize;
+    for chunk in &chunks {
+      let result = sqlx::query(
+        "INSERT INTO chunk (id, bank_id, source_id, chunk_index, text, content_hash, status, \
+         time_start, time_end, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?) \
+         ON CONFLICT(bank_id, content_hash) DO NOTHING",
+      )
+      .bind(chunk.id.to_string())
+      .bind(chunk.bank_id.to_string())
+      .bind(chunk.source_id.to_string())
+      .bind(i64::from(chunk.chunk_index))
+      .bind(&chunk.text)
+      .bind(&chunk.content_hash)
+      .bind(chunk.time_start.map(epoch_millis))
+      .bind(chunk.time_end.map(epoch_millis))
+      .bind(epoch_millis(chunk.created_at))
+      .bind(epoch_millis(chunk.created_at))
+      .execute(&mut *tx)
+      .await
+      .map_err(|error| map_write_error("chunk", error))?;
+      inserted += result.rows_affected() as usize;
+    }
+
+    let updated = sqlx::query(
+      "UPDATE source SET status = 'chunked', updated_at = COALESCE(?, updated_at) WHERE id = ?",
+    )
+    .bind(updated_at.map(epoch_millis))
+    .bind(source.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| map_write_error("source", error))?;
+
+    if updated.rows_affected() == 0 {
+      // Defensive: the source was read above inside this transaction.
+      return Err(Error::not_found("source", source.to_string()));
+    }
+
+    tx.commit()
+      .await
+      .map_err(|error| map_write_error("source", error))?;
+
+    Ok(inserted)
   }
 
   async fn claim_chunk(
