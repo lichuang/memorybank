@@ -1,8 +1,12 @@
 //! SQLite adapter.
 
+pub mod store;
+
 use engine::{Error, Result};
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
+
+pub use store::SqliteStore;
 
 /// Migrations are embedded at compile time from `migrations/sqlite/`, so the
 /// binary never depends on SQL files being present at runtime or on the working

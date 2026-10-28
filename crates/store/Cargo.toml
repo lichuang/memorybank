@@ -7,6 +7,7 @@ license.workspace = true
 description = "SQLite storage adapter for memorybank."
 
 [dependencies]
+async-trait.workspace = true
 engine.workspace = true
 sqlx = { version = "0.8", default-features = false, features = [
   "sqlite",

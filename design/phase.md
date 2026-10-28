@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 2/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (14/66 total)**
+> Current progress: **P0 12/12 · P1 3/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (15/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -332,11 +332,12 @@ pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256 (lo
 
 ## P1-3 `create_source` (tx0)
 
-**Status**: ❌
+**Status**: ✅ (2026-10-27)
 
-- **Content**: Store implementation + transaction boundary.
+- **Content**: first SQLite `Store` implementation + transaction boundary; bank creation/loading included so tests use real rows (option A).
+- **Design**: `SqliteStore` wraps a migrated pool and implements `create_bank` / `load_bank` / `create_source`; the remaining trait methods return `Error::Fatal("not implemented yet")` until their own tasks land. Error mapping: `UNIQUE` → `Conflict`, `SQLITE_BUSY`/`SQLITE_LOCKED` → `Retryable`, everything else → `Fatal`; missing bank → `NotFound`; corrupt stored ids/timestamps/profile levels → `Fatal`.
 - **Acceptance**: payload_text persisted, status=received; no half-writes before the crash point.
-- **Tests**: read-back consistency; duplicated callers each get a new row (no meaningful external id).
+- **Tests**: read-back consistency; duplicated callers each get a new row (no meaningful external id); duplicate id/name → `Conflict`; missing bank → `NotFound`; `chunked` status round-trips.
 
 ## P1-4 `append_chunks` (tx1)
 

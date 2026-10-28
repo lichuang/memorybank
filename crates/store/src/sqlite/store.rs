@@ -1,0 +1,290 @@
+//! SQLite implementation of the engine [`Store`] port.
+//!
+//! Implemented incrementally alongside the P1 tasks: bank/source writes first,
+//! the inbox and retrieval methods follow. Unimplemented methods return a
+//! [`Error::Fatal`] instead of panicking, so an accidental call is visible as an
+//! error rather than a crash.
+
+use std::time::Duration;
+
+use async_trait::async_trait;
+use engine::ports::{
+  ChunkCommit, ClaimedChunk, EntityCandidate, Neighbor, NewChunk, NewEntity, NewObservation,
+  NewOpinion, Store, WorkLists,
+};
+use engine::types::{
+  Bank, BankId, BankProfile, ChunkId, EntityId, Fact, FactId, Source, SourceId, SourceStatus,
+  TimeRange, Timestamp,
+};
+use engine::{Error, Result};
+use sqlx::SqlitePool;
+
+/// A [`Store`] backed by a SQLite connection pool.
+#[derive(Debug, Clone)]
+pub struct SqliteStore {
+  pool: SqlitePool,
+}
+
+impl SqliteStore {
+  /// Wraps an already-migrated pool.
+  pub fn new(pool: SqlitePool) -> Self {
+    Self { pool }
+  }
+
+  /// Returns the underlying pool (used by adapter tests and maintenance tools).
+  pub fn pool(&self) -> &SqlitePool {
+    &self.pool
+  }
+}
+
+#[async_trait]
+impl Store for SqliteStore {
+  async fn create_bank(&self, bank: Bank) -> Result<()> {
+    sqlx::query(
+      "INSERT INTO bank (id, name, background, skepticism, literalism, empathy, bias_strength, \
+       created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(bank.id.to_string())
+    .bind(&bank.name)
+    .bind(&bank.profile.background)
+    .bind(i64::from(bank.profile.skepticism))
+    .bind(i64::from(bank.profile.literalism))
+    .bind(i64::from(bank.profile.empathy))
+    .bind(f64::from(bank.profile.bias_strength))
+    .bind(epoch_millis(bank.created_at))
+    .bind(epoch_millis(bank.updated_at))
+    .execute(&self.pool)
+    .await
+    .map_err(|error| map_write_error("bank", error))?;
+
+    Ok(())
+  }
+
+  async fn load_bank(&self, id: BankId) -> Result<Bank> {
+    type Row = (String, String, String, i64, i64, i64, f64, i64, i64);
+
+    let row = sqlx::query_as::<_, Row>(
+      "SELECT id, name, background, skepticism, literalism, empathy, bias_strength, \
+       created_at, updated_at FROM bank WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&self.pool)
+    .await
+    .map_err(|error| map_read_error("bank", error))?
+    .ok_or_else(|| Error::not_found("bank", id.to_string()))?;
+
+    let (
+      id_text,
+      name,
+      background,
+      skepticism,
+      literalism,
+      empathy,
+      bias_strength,
+      created_at,
+      updated_at,
+    ) = row;
+
+    let bank_id = BankId::parse(&id_text)
+      .map_err(|error| Error::fatal(format!("corrupt bank id `{id_text}`: {error}")))?;
+
+    let profile = BankProfile {
+      background,
+      skepticism: level("skepticism", skepticism)?,
+      literalism: level("literalism", literalism)?,
+      empathy: level("empathy", empathy)?,
+      bias_strength: bias_strength as f32,
+    };
+
+    Ok(Bank {
+      id: bank_id,
+      name,
+      profile,
+      created_at: timestamp(created_at)?,
+      updated_at: timestamp(updated_at)?,
+    })
+  }
+
+  async fn create_source(&self, source: Source) -> Result<()> {
+    sqlx::query(
+      "INSERT INTO source (id, bank_id, title, payload_text, status, created_at, updated_at) \
+       VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(source.id.to_string())
+    .bind(source.bank_id.to_string())
+    .bind(source.title.as_deref())
+    .bind(&source.payload_text)
+    .bind(source_status(source.status))
+    .bind(epoch_millis(source.created_at))
+    .bind(epoch_millis(source.updated_at))
+    .execute(&self.pool)
+    .await
+    .map_err(|error| map_write_error("source", error))?;
+
+    Ok(())
+  }
+
+  // —— Not implemented yet (P1-4 onward) ——
+
+  async fn append_chunks(&self, _source: SourceId, _chunks: Vec<NewChunk>) -> Result<usize> {
+    Err(not_implemented("append_chunks"))
+  }
+
+  async fn claim_chunk(
+    &self,
+    _bank: BankId,
+    _now: Timestamp,
+    _stale_after: Duration,
+  ) -> Result<Option<ClaimedChunk>> {
+    Err(not_implemented("claim_chunk"))
+  }
+
+  async fn release_chunk(&self, _chunk: ChunkId) -> Result<()> {
+    Err(not_implemented("release_chunk"))
+  }
+
+  async fn commit_chunk(&self, _commit: ChunkCommit) -> Result<()> {
+    Err(not_implemented("commit_chunk"))
+  }
+
+  async fn search_vector(
+    &self,
+    _bank: BankId,
+    _query: &[f32],
+    _k: usize,
+  ) -> Result<Vec<(FactId, f32)>> {
+    Err(not_implemented("search_vector"))
+  }
+
+  async fn search_bm25(
+    &self,
+    _bank: BankId,
+    _query: &str,
+    _k: usize,
+  ) -> Result<Vec<(FactId, f32)>> {
+    Err(not_implemented("search_bm25"))
+  }
+
+  async fn neighbors(&self, _bank: BankId, _from: FactId) -> Result<Vec<Neighbor>> {
+    Err(not_implemented("neighbors"))
+  }
+
+  async fn facts_in_range(&self, _bank: BankId, _range: TimeRange) -> Result<Vec<FactId>> {
+    Err(not_implemented("facts_in_range"))
+  }
+
+  async fn fetch_facts(&self, _ids: &[FactId]) -> Result<Vec<Fact>> {
+    Err(not_implemented("fetch_facts"))
+  }
+
+  async fn increment_access(&self, _ids: &[FactId]) -> Result<()> {
+    Err(not_implemented("increment_access"))
+  }
+
+  async fn ensure_entity(&self, _new: NewEntity) -> Result<(EntityId, bool)> {
+    Err(not_implemented("ensure_entity"))
+  }
+
+  async fn entity_candidates(&self, _bank: BankId, _mention: &str) -> Result<Vec<EntityCandidate>> {
+    Err(not_implemented("entity_candidates"))
+  }
+
+  async fn insert_opinion(&self, _opinion: NewOpinion) -> Result<()> {
+    Err(not_implemented("insert_opinion"))
+  }
+
+  async fn insert_observations(&self, _observations: Vec<NewObservation>) -> Result<()> {
+    Err(not_implemented("insert_observations"))
+  }
+
+  async fn observations_of(
+    &self,
+    _bank: BankId,
+    _entity: EntityId,
+    _limit: usize,
+  ) -> Result<Vec<Fact>> {
+    Err(not_implemented("observations_of"))
+  }
+
+  async fn pending_work(
+    &self,
+    _bank: BankId,
+    _now: Timestamp,
+    _stale_after: Duration,
+  ) -> Result<WorkLists> {
+    Err(not_implemented("pending_work"))
+  }
+
+  async fn update_embeddings(&self, _embeddings: &[(FactId, Vec<f32>)]) -> Result<usize> {
+    Err(not_implemented("update_embeddings"))
+  }
+
+  async fn gc_observations(
+    &self,
+    _bank: BankId,
+    _now: Timestamp,
+    _max_age: Duration,
+    _per_entity_cap: usize,
+  ) -> Result<usize> {
+    Err(not_implemented("gc_observations"))
+  }
+}
+
+fn not_implemented(method: &str) -> Error {
+  Error::fatal(format!("SqliteStore::{method} is not implemented yet"))
+}
+
+fn epoch_millis(timestamp: Timestamp) -> i64 {
+  timestamp.timestamp_millis()
+}
+
+fn timestamp(millis: i64) -> Result<Timestamp> {
+  Timestamp::from_timestamp_millis(millis)
+    .ok_or_else(|| Error::fatal(format!("corrupt timestamp `{millis}` in database")))
+}
+
+fn level(field: &'static str, value: i64) -> Result<u8> {
+  u8::try_from(value)
+    .ok()
+    .filter(|value| (1..=5).contains(value))
+    .ok_or_else(|| Error::fatal(format!("corrupt profile level `{field}` = {value}")))
+}
+
+fn source_status(status: SourceStatus) -> &'static str {
+  match status {
+    SourceStatus::Received => "received",
+    SourceStatus::Chunked => "chunked",
+  }
+}
+
+/// Maps write failures: unique violations become [`Error::Conflict`], SQLite
+/// contention becomes [`Error::Retryable`], everything else is fatal.
+fn map_write_error(entity: &'static str, error: sqlx::Error) -> Error {
+  if let sqlx::Error::Database(database) = &error {
+    if database.is_unique_violation() {
+      return Error::conflict(entity, error.to_string());
+    }
+    if is_contention(database.as_ref()) {
+      return Error::retryable(error.to_string());
+    }
+  }
+  Error::fatal(format!("{entity} write failed: {error}"))
+}
+
+/// Maps read failures the same way, minus the uniqueness case.
+fn map_read_error(entity: &'static str, error: sqlx::Error) -> Error {
+  if let sqlx::Error::Database(database) = &error
+    && is_contention(database.as_ref())
+  {
+    return Error::retryable(error.to_string());
+  }
+  Error::fatal(format!("{entity} read failed: {error}"))
+}
+
+/// `SQLITE_BUSY` (5) and `SQLITE_LOCKED` (6), including extended result codes.
+fn is_contention(database: &dyn sqlx::error::DatabaseError) -> bool {
+  database
+    .code()
+    .and_then(|code| code.parse::<u32>().ok())
+    .is_some_and(|code| matches!(code & 0xff, 5 | 6))
+}
