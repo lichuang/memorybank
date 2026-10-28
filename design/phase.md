@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 4/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (16/66 total)**
+> Current progress: **P0 12/12 · P1 5/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (17/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -350,7 +350,7 @@ pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256 (lo
 
 ## P1-5 `claim_chunk`
 
-**Status**: ❌
+**Status**: ✅ (2026-10-28)
 
 - **Content**: atomic claim + stale reclaim + monotonic claim token.
 - **Design**:
@@ -366,7 +366,7 @@ RETURNING *;
 -- PG dialect would use GREATEST instead of MAX
 ```
 - **Acceptance**: with two concurrent workers only one claims; stale `extracting` rows are reclaimed; each claim's `updated_at` is strictly greater than the previous one (even under `FixedClock`), so it can serve as the tx2 claim token.
-- **Tests**: 10 concurrent claims, only 1 succeeds; reset after time rewind; two claims in the same millisecond get distinct tokens.
+- **Tests**: 10 concurrent claims, only 1 succeeds; oldest-first ordering; fresh claims not stolen; stale reclaim advances the token; same-millisecond claims get distinct tokens; `failed` rows never claimed; empty bank → `None`.
 
 ## P1-6 `release_chunk`
 

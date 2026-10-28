@@ -13,8 +13,8 @@ use engine::ports::{
   NewOpinion, Store, WorkLists,
 };
 use engine::types::{
-  Bank, BankId, BankProfile, ChunkId, EntityId, Fact, FactId, Source, SourceId, SourceStatus,
-  TimeRange, Timestamp,
+  Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, EntityId, Fact, FactId, Source, SourceId,
+  SourceStatus, TimeRange, Timestamp,
 };
 use engine::{Error, Result};
 use sqlx::SqlitePool;
@@ -206,11 +206,35 @@ impl Store for SqliteStore {
 
   async fn claim_chunk(
     &self,
-    _bank: BankId,
-    _now: Timestamp,
-    _stale_after: Duration,
+    bank: BankId,
+    now: Timestamp,
+    stale_after: Duration,
   ) -> Result<Option<ClaimedChunk>> {
-    Err(not_implemented("claim_chunk"))
+    let now_millis = epoch_millis(now);
+    let stale_before = now_millis.saturating_sub(duration_millis(stale_after));
+
+    let row = sqlx::query_as::<_, ChunkRow>(
+      "UPDATE chunk SET status = 'extracting', updated_at = MAX(?, updated_at + 1) \
+       WHERE id = ( \
+         SELECT id FROM chunk \
+         WHERE bank_id = ? \
+           AND (status = 'pending' OR (status = 'extracting' AND updated_at < ?)) \
+         ORDER BY created_at, id LIMIT 1 \
+       ) \
+       RETURNING id, bank_id, source_id, chunk_index, text, content_hash, status, \
+                 time_start, time_end, created_at, updated_at",
+    )
+    .bind(now_millis)
+    .bind(bank.to_string())
+    .bind(stale_before)
+    .fetch_optional(&self.pool)
+    .await
+    .map_err(|error| map_write_error("chunk", error))?;
+
+    row
+      .map(chunk_from_row)
+      .transpose()
+      .map(|claimed| claimed.map(|chunk| ClaimedChunk { chunk }))
   }
 
   async fn release_chunk(&self, _chunk: ChunkId) -> Result<()> {
@@ -310,6 +334,68 @@ fn not_implemented(method: &str) -> Error {
 
 fn epoch_millis(timestamp: Timestamp) -> i64 {
   timestamp.timestamp_millis()
+}
+
+fn duration_millis(duration: Duration) -> i64 {
+  i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+type ChunkRow = (
+  String,
+  String,
+  String,
+  i64,
+  String,
+  String,
+  String,
+  Option<i64>,
+  Option<i64>,
+  i64,
+  i64,
+);
+
+fn chunk_from_row(row: ChunkRow) -> Result<Chunk> {
+  let (
+    id,
+    bank_id,
+    source_id,
+    chunk_index,
+    text,
+    content_hash,
+    status,
+    time_start,
+    time_end,
+    created_at,
+    updated_at,
+  ) = row;
+
+  Ok(Chunk {
+    id: ChunkId::parse(&id)
+      .map_err(|error| Error::fatal(format!("corrupt chunk id `{id}`: {error}")))?,
+    bank_id: BankId::parse(&bank_id)
+      .map_err(|error| Error::fatal(format!("corrupt bank id `{bank_id}`: {error}")))?,
+    source_id: SourceId::parse(&source_id)
+      .map_err(|error| Error::fatal(format!("corrupt source id `{source_id}`: {error}")))?,
+    chunk_index: u32::try_from(chunk_index)
+      .map_err(|_| Error::fatal(format!("corrupt chunk index `{chunk_index}`")))?,
+    text,
+    content_hash,
+    status: chunk_status(&status)?,
+    time_start: time_start.map(timestamp).transpose()?,
+    time_end: time_end.map(timestamp).transpose()?,
+    created_at: timestamp(created_at)?,
+    updated_at: timestamp(updated_at)?,
+  })
+}
+
+fn chunk_status(value: &str) -> Result<ChunkStatus> {
+  match value {
+    "pending" => Ok(ChunkStatus::Pending),
+    "extracting" => Ok(ChunkStatus::Extracting),
+    "done" => Ok(ChunkStatus::Done),
+    "failed" => Ok(ChunkStatus::Failed),
+    other => Err(Error::fatal(format!("corrupt chunk status `{other}`"))),
+  }
 }
 
 fn timestamp(millis: i64) -> Result<Timestamp> {
