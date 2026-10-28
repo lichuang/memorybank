@@ -2,6 +2,9 @@
 
 pub mod store;
 
+pub(crate) mod error;
+pub(crate) mod time;
+
 use engine::{Error, Result};
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;

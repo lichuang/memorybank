@@ -14,10 +14,13 @@ use engine::ports::{
 };
 use engine::types::{
   Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, EntityId, Fact, FactId, Source, SourceId,
-  SourceStatus, TimeRange, Timestamp,
+  TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
 };
 use engine::{Error, Result};
 use sqlx::SqlitePool;
+
+use super::error::{map_read, map_write};
+use super::time::duration_millis;
 
 /// A [`Store`] backed by a SQLite connection pool.
 #[derive(Debug, Clone)]
@@ -51,11 +54,11 @@ impl Store for SqliteStore {
     .bind(i64::from(bank.profile.literalism))
     .bind(i64::from(bank.profile.empathy))
     .bind(f64::from(bank.profile.bias_strength))
-    .bind(epoch_millis(bank.created_at))
-    .bind(epoch_millis(bank.updated_at))
+    .bind(to_epoch_millis(bank.created_at))
+    .bind(to_epoch_millis(bank.updated_at))
     .execute(&self.pool)
     .await
-    .map_err(|error| map_write_error("bank", error))?;
+    .map_err(|error| map_write("bank", error))?;
 
     Ok(())
   }
@@ -70,7 +73,7 @@ impl Store for SqliteStore {
     .bind(id.to_string())
     .fetch_optional(&self.pool)
     .await
-    .map_err(|error| map_read_error("bank", error))?
+    .map_err(|error| map_read("bank", error))?
     .ok_or_else(|| Error::not_found("bank", id.to_string()))?;
 
     let (
@@ -114,12 +117,12 @@ impl Store for SqliteStore {
     .bind(source.bank_id.to_string())
     .bind(source.title.as_deref())
     .bind(&source.payload_text)
-    .bind(source_status(source.status))
-    .bind(epoch_millis(source.created_at))
-    .bind(epoch_millis(source.updated_at))
+    .bind(source.status.as_str())
+    .bind(to_epoch_millis(source.created_at))
+    .bind(to_epoch_millis(source.updated_at))
     .execute(&self.pool)
     .await
-    .map_err(|error| map_write_error("source", error))?;
+    .map_err(|error| map_write("source", error))?;
 
     Ok(())
   }
@@ -140,14 +143,14 @@ impl Store for SqliteStore {
       .pool
       .begin()
       .await
-      .map_err(|error| map_write_error("chunk", error))?;
+      .map_err(|error| map_write("chunk", error))?;
 
     // The source must exist and own the batch's bank (schema §3.3).
     let stored_bank: Option<String> = sqlx::query_scalar("SELECT bank_id FROM source WHERE id = ?")
       .bind(source.to_string())
       .fetch_optional(&mut *tx)
       .await
-      .map_err(|error| map_read_error("source", error))?;
+      .map_err(|error| map_read("source", error))?;
     let stored_bank = stored_bank.ok_or_else(|| Error::not_found("source", source.to_string()))?;
     let bank_id = BankId::parse(&stored_bank)
       .map_err(|error| Error::fatal(format!("corrupt bank id `{stored_bank}`: {error}")))?;
@@ -173,24 +176,24 @@ impl Store for SqliteStore {
       .bind(i64::from(chunk.chunk_index))
       .bind(&chunk.text)
       .bind(&chunk.content_hash)
-      .bind(chunk.time_start.map(epoch_millis))
-      .bind(chunk.time_end.map(epoch_millis))
-      .bind(epoch_millis(chunk.created_at))
-      .bind(epoch_millis(chunk.created_at))
+      .bind(chunk.time_start.map(to_epoch_millis))
+      .bind(chunk.time_end.map(to_epoch_millis))
+      .bind(to_epoch_millis(chunk.created_at))
+      .bind(to_epoch_millis(chunk.created_at))
       .execute(&mut *tx)
       .await
-      .map_err(|error| map_write_error("chunk", error))?;
+      .map_err(|error| map_write("chunk", error))?;
       inserted += result.rows_affected() as usize;
     }
 
     let updated = sqlx::query(
       "UPDATE source SET status = 'chunked', updated_at = COALESCE(?, updated_at) WHERE id = ?",
     )
-    .bind(updated_at.map(epoch_millis))
+    .bind(updated_at.map(to_epoch_millis))
     .bind(source.to_string())
     .execute(&mut *tx)
     .await
-    .map_err(|error| map_write_error("source", error))?;
+    .map_err(|error| map_write("source", error))?;
 
     if updated.rows_affected() == 0 {
       // Defensive: the source was read above inside this transaction.
@@ -199,7 +202,7 @@ impl Store for SqliteStore {
 
     tx.commit()
       .await
-      .map_err(|error| map_write_error("source", error))?;
+      .map_err(|error| map_write("source", error))?;
 
     Ok(inserted)
   }
@@ -210,7 +213,7 @@ impl Store for SqliteStore {
     now: Timestamp,
     stale_after: Duration,
   ) -> Result<Option<ClaimedChunk>> {
-    let now_millis = epoch_millis(now);
+    let now_millis = to_epoch_millis(now);
     let stale_before = now_millis.saturating_sub(duration_millis(stale_after));
 
     let row = sqlx::query_as::<_, ChunkRow>(
@@ -229,7 +232,7 @@ impl Store for SqliteStore {
     .bind(stale_before)
     .fetch_optional(&self.pool)
     .await
-    .map_err(|error| map_write_error("chunk", error))?;
+    .map_err(|error| map_write("chunk", error))?;
 
     row
       .map(chunk_from_row)
@@ -332,14 +335,6 @@ fn not_implemented(method: &str) -> Error {
   Error::fatal(format!("SqliteStore::{method} is not implemented yet"))
 }
 
-fn epoch_millis(timestamp: Timestamp) -> i64 {
-  timestamp.timestamp_millis()
-}
-
-fn duration_millis(duration: Duration) -> i64 {
-  i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-}
-
 type ChunkRow = (
   String,
   String,
@@ -380,7 +375,9 @@ fn chunk_from_row(row: ChunkRow) -> Result<Chunk> {
       .map_err(|_| Error::fatal(format!("corrupt chunk index `{chunk_index}`")))?,
     text,
     content_hash,
-    status: chunk_status(&status)?,
+    status: status
+      .parse::<ChunkStatus>()
+      .map_err(|error| Error::fatal(error.to_string()))?,
     time_start: time_start.map(timestamp).transpose()?,
     time_end: time_end.map(timestamp).transpose()?,
     created_at: timestamp(created_at)?,
@@ -388,18 +385,8 @@ fn chunk_from_row(row: ChunkRow) -> Result<Chunk> {
   })
 }
 
-fn chunk_status(value: &str) -> Result<ChunkStatus> {
-  match value {
-    "pending" => Ok(ChunkStatus::Pending),
-    "extracting" => Ok(ChunkStatus::Extracting),
-    "done" => Ok(ChunkStatus::Done),
-    "failed" => Ok(ChunkStatus::Failed),
-    other => Err(Error::fatal(format!("corrupt chunk status `{other}`"))),
-  }
-}
-
 fn timestamp(millis: i64) -> Result<Timestamp> {
-  Timestamp::from_timestamp_millis(millis)
+  from_epoch_millis(millis)
     .ok_or_else(|| Error::fatal(format!("corrupt timestamp `{millis}` in database")))
 }
 
@@ -408,43 +395,4 @@ fn level(field: &'static str, value: i64) -> Result<u8> {
     .ok()
     .filter(|value| (1..=5).contains(value))
     .ok_or_else(|| Error::fatal(format!("corrupt profile level `{field}` = {value}")))
-}
-
-fn source_status(status: SourceStatus) -> &'static str {
-  match status {
-    SourceStatus::Received => "received",
-    SourceStatus::Chunked => "chunked",
-  }
-}
-
-/// Maps write failures: unique violations become [`Error::Conflict`], SQLite
-/// contention becomes [`Error::Retryable`], everything else is fatal.
-fn map_write_error(entity: &'static str, error: sqlx::Error) -> Error {
-  if let sqlx::Error::Database(database) = &error {
-    if database.is_unique_violation() {
-      return Error::conflict(entity, error.to_string());
-    }
-    if is_contention(database.as_ref()) {
-      return Error::retryable(error.to_string());
-    }
-  }
-  Error::fatal(format!("{entity} write failed: {error}"))
-}
-
-/// Maps read failures the same way, minus the uniqueness case.
-fn map_read_error(entity: &'static str, error: sqlx::Error) -> Error {
-  if let sqlx::Error::Database(database) = &error
-    && is_contention(database.as_ref())
-  {
-    return Error::retryable(error.to_string());
-  }
-  Error::fatal(format!("{entity} read failed: {error}"))
-}
-
-/// `SQLITE_BUSY` (5) and `SQLITE_LOCKED` (6), including extended result codes.
-fn is_contention(database: &dyn sqlx::error::DatabaseError) -> bool {
-  database
-    .code()
-    .and_then(|code| code.parse::<u32>().ok())
-    .is_some_and(|code| matches!(code & 0xff, 5 | 6))
 }
