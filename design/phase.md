@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 6/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (18/66 total)**
+> Current progress: **P0 12/12 · P1 7/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (19/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -379,19 +379,24 @@ RETURNING *;
 
 ## P1-7 Extraction Call
 
-**Status**: ❌
+**Status**: ✅ (2026-10-29)
 
 - **Content**: A.1 prompt + schema + parse validation.
 - **Design**:
 ```rust
-pub async fn extract_facts(llm:&dyn Llm, chunk:&Chunk, cfg:&ExtractionConfig) -> Result<ExtractionReport>
+pub struct ExtractionConfig { pub temperature: f32, pub max_tokens: u32, pub max_input_chars: usize }
 pub struct ExtractionReport { pub facts: Vec<ExtractedFact>, pub discarded: usize }
-// prompt: full A.1 text (system), user=chunk.text; schema_name="fact_extraction"
-// validation: non-empty what; valid fact_type; causal.target_fact_index < facts.len()
-pub fn validate_extracted(f: &ExtractedFact) -> Result<()>
+pub async fn extract_facts(llm:&dyn Llm, chunk:&Chunk, cfg:&ExtractionConfig) -> Result<ExtractionReport>
+pub fn validate_extracted(f: &ExtractedFact) -> Option<&'static str>   // reason to discard
+// prompt: prompts/extraction.md (A.1, adapted to the DTO), embedded with include_str!,
+//         used as the system message; user = chunk.text; schema_name = "fact_extraction"
+// schema: schema_for!(FactExtractionResponse), passed as request data
 ```
-- **Acceptance**: invalid single facts are discarded and counted; call-level retry only for Retryable.
-- **Tests**: FakeLlm returns 3 facts with 1 bad; empty result; oversized text truncation policy.
+- **Validation scope**: `fact_type` is a typed enum, so an invalid value fails deserialization of the whole response (adapter repair may fix it; otherwise `Fatal`). Per-fact checks are semantic: non-empty `what`; observation rows are rejected (they are synthesized, not extracted); empty entity mentions are dropped.
+- **Causal remapping**: model indices refer to the original `facts` array. After discarding invalid facts, surviving indices are remapped; references to dropped facts, out-of-range indices, and self-references are removed (logged).
+- **Oversized input**: chunk text above `max_input_chars` is truncated on a UTF-8 char boundary with a `tracing::warn` (0 disables the safety net; chunking should already bound the size).
+- **Acceptance**: invalid single facts are discarded and counted; causal references stay valid after filtering; call-level retry only for `Retryable`.
+- **Tests**: FakeLlm returns 3 facts with 1 bad; causal remapping across a dropped fact; self-reference removal; observation rejection; empty result; UTF-8 truncation; schema mismatch → `Fatal`; `Retryable` propagation.
 
 ## P1-8 Time and Augmented Text
 
