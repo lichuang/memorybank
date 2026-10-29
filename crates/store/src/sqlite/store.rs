@@ -240,8 +240,32 @@ impl Store for SqliteStore {
       .map(|claimed| claimed.map(|chunk| ClaimedChunk { chunk }))
   }
 
-  async fn release_chunk(&self, _chunk: ChunkId) -> Result<()> {
-    Err(not_implemented("release_chunk"))
+  async fn release_chunk(&self, chunk: ChunkId, now: Timestamp) -> Result<()> {
+    let released = sqlx::query(
+      "UPDATE chunk SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'extracting'",
+    )
+    .bind(to_epoch_millis(now))
+    .bind(chunk.to_string())
+    .execute(&self.pool)
+    .await
+    .map_err(|error| map_write("chunk", error))?;
+
+    if released.rows_affected() > 0 {
+      return Ok(());
+    }
+
+    // Nothing was updated: either the row is gone, or it is not `extracting`
+    // (already released, done, or dead-lettered). Never resurrect those states.
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM chunk WHERE id = ?")
+      .bind(chunk.to_string())
+      .fetch_optional(&self.pool)
+      .await
+      .map_err(|error| map_read("chunk", error))?;
+
+    match status {
+      Some(_) => Ok(()),
+      None => Err(Error::not_found("chunk", chunk.to_string())),
+    }
   }
 
   async fn commit_chunk(&self, _commit: ChunkCommit) -> Result<()> {

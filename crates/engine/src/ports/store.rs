@@ -54,8 +54,13 @@ pub trait Store: Send + Sync {
     stale_after: Duration,
   ) -> Result<Option<ClaimedChunk>>;
 
-  /// Returns a claimed chunk to `pending` after a failed extraction.
-  async fn release_chunk(&self, chunk: ChunkId) -> Result<()>;
+  /// Returns a claimed chunk to `pending` after a failed extraction, refreshing
+  /// `updated_at = now`.
+  ///
+  /// Idempotent: a row that is already `pending`, `done`, or `failed` is left
+  /// untouched and reported as success; only a missing row yields
+  /// [`crate::Error::NotFound`].
+  async fn release_chunk(&self, chunk: ChunkId, now: Timestamp) -> Result<()>;
 
   /// The only transaction entry for extraction products (tx2): facts, entity
   /// bindings, links, entity statistics, and opinion updates are written
@@ -437,7 +442,7 @@ mod tests {
     ) -> Result<Option<ClaimedChunk>> {
       unreachable!("stub")
     }
-    async fn release_chunk(&self, _chunk: ChunkId) -> Result<()> {
+    async fn release_chunk(&self, _chunk: ChunkId, _now: Timestamp) -> Result<()> {
       unreachable!("stub")
     }
     async fn commit_chunk(&self, _commit: ChunkCommit) -> Result<()> {

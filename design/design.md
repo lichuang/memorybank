@@ -112,7 +112,7 @@ pub trait Store: Send + Sync {
     async fn append_chunks(&self, src: SourceId, chunks: Vec<NewChunk>) -> Result<usize>;    // tx1; hash conflicts skipped
     async fn claim_chunk(&self, bank: BankId, now: Timestamp, stale_after: Duration)
         -> Result<Option<ClaimedChunk>>;                                                     // atomic pending→extracting claim
-    async fn release_chunk(&self, chunk: ChunkId) -> Result<()>;                             // on failure: back to pending
+    async fn release_chunk(&self, chunk: ChunkId, now: Timestamp) -> Result<()>;              // on failure: back to pending (idempotent)
     async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;                         // tx2: all products + status=done atomically
 
     // —— Read path (schema §5.4, four channels) ——

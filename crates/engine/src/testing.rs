@@ -12,8 +12,16 @@ use chrono::{Duration, NaiveDate};
 use serde_json::Value;
 
 use crate::ports::{Clock, Embedder, JsonRequest, Llm, Reranker, TemporalParser};
-use crate::types::{TimeRange, Timestamp};
+use crate::types::{TimeRange, Timestamp, from_epoch_millis};
 use crate::{Error, Result};
+
+/// Builds a UTC timestamp from epoch milliseconds.
+///
+/// Test helper: keeps fixtures readable without repeating the fallible
+/// conversion. Panics when `millis` is not representable.
+pub fn timestamp(millis: i64) -> Timestamp {
+  from_epoch_millis(millis).expect("test timestamp must be representable")
+}
 
 /// A scripted [`Llm`]: returns queued JSON responses per schema and records
 /// every request.

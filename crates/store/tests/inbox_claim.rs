@@ -3,15 +3,12 @@
 use std::time::Duration;
 
 use engine::ports::{NewChunk, Store};
+use engine::testing::timestamp;
 use engine::types::{
-  Bank, BankId, BankProfile, ChunkId, ChunkStatus, Source, SourceId, SourceStatus, Timestamp,
+  Bank, BankId, BankProfile, ChunkId, ChunkStatus, Source, SourceId, SourceStatus,
 };
 use store::SqliteStore;
 use store::testing::memory_pool;
-
-fn ts(millis: i64) -> Timestamp {
-  Timestamp::from_timestamp_millis(millis).expect("valid timestamp")
-}
 
 async fn setup() -> (SqliteStore, BankId, SourceId) {
   let store = SqliteStore::new(memory_pool().await.expect("in-memory store"));
@@ -25,8 +22,8 @@ async fn setup() -> (SqliteStore, BankId, SourceId) {
       empathy: 3,
       bias_strength: 0.5,
     },
-    created_at: ts(0),
-    updated_at: ts(0),
+    created_at: timestamp(0),
+    updated_at: timestamp(0),
   };
   store.create_bank(bank.clone()).await.expect("create bank");
 
@@ -36,8 +33,8 @@ async fn setup() -> (SqliteStore, BankId, SourceId) {
     title: None,
     payload_text: "payload".into(),
     status: SourceStatus::Received,
-    created_at: ts(0),
-    updated_at: ts(0),
+    created_at: timestamp(0),
+    updated_at: timestamp(0),
   };
   store
     .create_source(source.clone())
@@ -57,7 +54,7 @@ fn chunk(bank: BankId, source: SourceId, index: u32, hash: &str, created_at: i64
     content_hash: hash.into(),
     time_start: None,
     time_end: None,
-    created_at: ts(created_at),
+    created_at: timestamp(created_at),
   }
 }
 
@@ -76,7 +73,7 @@ async fn claims_the_oldest_pending_chunk() {
     .expect("seed chunks");
 
   let claimed = store
-    .claim_chunk(bank, ts(5_000), Duration::ZERO)
+    .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
     .await
     .expect("claim")
     .expect("a chunk");
@@ -85,10 +82,14 @@ async fn claims_the_oldest_pending_chunk() {
   assert_eq!(claimed.chunk.status, ChunkStatus::Extracting);
   assert_eq!(claimed.chunk.bank_id, bank);
   assert_eq!(claimed.chunk.source_id, source);
-  assert_eq!(claimed.chunk.updated_at, ts(5_000), "claim token = now");
+  assert_eq!(
+    claimed.chunk.updated_at,
+    timestamp(5_000),
+    "claim token = now"
+  );
 
   let next = store
-    .claim_chunk(bank, ts(5_000), Duration::ZERO)
+    .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
     .await
     .expect("claim")
     .expect("second chunk");
@@ -96,7 +97,7 @@ async fn claims_the_oldest_pending_chunk() {
 
   assert!(
     store
-      .claim_chunk(bank, ts(5_000), Duration::ZERO)
+      .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
       .await
       .expect("claim")
       .is_none()
@@ -109,7 +110,7 @@ async fn returns_none_for_an_empty_bank() {
 
   assert!(
     store
-      .claim_chunk(bank, ts(5_000), Duration::ZERO)
+      .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
       .await
       .expect("claim")
       .is_none()
@@ -125,14 +126,14 @@ async fn fresh_claims_are_not_stolen() {
     .expect("seed chunk");
 
   store
-    .claim_chunk(bank, ts(5_000), Duration::ZERO)
+    .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
     .await
     .expect("first claim")
     .expect("chunk");
 
   assert!(
     store
-      .claim_chunk(bank, ts(5_000), Duration::ZERO)
+      .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
       .await
       .expect("second claim")
       .is_none(),
@@ -149,21 +150,21 @@ async fn stale_claims_are_reclaimed_with_a_larger_token() {
     .expect("seed chunk");
 
   let first = store
-    .claim_chunk(bank, ts(5_000), Duration::ZERO)
+    .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
     .await
     .expect("first claim")
     .expect("chunk");
-  assert_eq!(first.chunk.updated_at, ts(5_000));
+  assert_eq!(first.chunk.updated_at, timestamp(5_000));
 
   // now - stale_after = 5_500; the row (5_000) is stale and gets reclaimed.
   let second = store
-    .claim_chunk(bank, ts(6_000), Duration::from_millis(500))
+    .claim_chunk(bank, timestamp(6_000), Duration::from_millis(500))
     .await
     .expect("reclaim")
     .expect("stale chunk");
 
   assert_eq!(second.chunk.id, first.chunk.id);
-  assert_eq!(second.chunk.updated_at, ts(6_000));
+  assert_eq!(second.chunk.updated_at, timestamp(6_000));
   assert!(second.chunk.updated_at > first.chunk.updated_at);
 }
 
@@ -176,11 +177,11 @@ async fn same_millisecond_claims_get_distinct_tokens() {
     .expect("seed chunk");
 
   let first = store
-    .claim_chunk(bank, ts(5_000), Duration::ZERO)
+    .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
     .await
     .expect("first claim")
     .expect("chunk");
-  assert_eq!(first.chunk.updated_at, ts(5_000));
+  assert_eq!(first.chunk.updated_at, timestamp(5_000));
 
   // Simulate a release that keeps the timestamp, then claim again at the same
   // instant: `MAX(now, updated_at + 1)` must advance the token.
@@ -191,12 +192,12 @@ async fn same_millisecond_claims_get_distinct_tokens() {
     .expect("manual release");
 
   let second = store
-    .claim_chunk(bank, ts(5_000), Duration::ZERO)
+    .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
     .await
     .expect("second claim")
     .expect("chunk");
 
-  assert_eq!(second.chunk.updated_at, ts(5_001));
+  assert_eq!(second.chunk.updated_at, timestamp(5_001));
   assert_ne!(first.chunk.updated_at, second.chunk.updated_at);
 }
 
@@ -216,7 +217,7 @@ async fn failed_chunks_are_never_claimed() {
 
   assert!(
     store
-      .claim_chunk(bank, ts(5_000), Duration::from_secs(3_600))
+      .claim_chunk(bank, timestamp(5_000), Duration::from_secs(3_600))
       .await
       .expect("claim")
       .is_none()
@@ -236,7 +237,7 @@ async fn concurrent_claims_grant_exactly_one_worker() {
     let store = store.clone();
     handles.push(tokio::spawn(async move {
       store
-        .claim_chunk(bank, ts(5_000), Duration::ZERO)
+        .claim_chunk(bank, timestamp(5_000), Duration::ZERO)
         .await
         .expect("claim")
     }));

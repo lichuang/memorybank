@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 5/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (17/66 total)**
+> Current progress: **P0 12/12 · P1 6/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (18/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -195,7 +195,7 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
   async fn create_source(&self, source:Source)->Result<()>;
   async fn append_chunks(&self, src:SourceId, chunks:Vec<NewChunk>)->Result<usize>;  // inserted count
   async fn claim_chunk(&self, bank:BankId, now:Timestamp, stale_after:Duration)->Result<Option<ClaimedChunk>>;
-  async fn release_chunk(&self, chunk:ChunkId)->Result<()>;
+  async fn release_chunk(&self, chunk:ChunkId, now:Timestamp)->Result<()>;   // extracting→pending; idempotent otherwise
   async fn commit_chunk(&self, c:ChunkCommit)->Result<()>;
   // retrieval
   async fn search_vector(&self, bank:BankId, q:&[f32], k:usize)->Result<Vec<(FactId,f32)>>;
@@ -370,11 +370,12 @@ RETURNING *;
 
 ## P1-6 `release_chunk`
 
-**Status**: ❌
+**Status**: ✅ (2026-10-29)
 
-- **Content**: return to pending on failure.
-- **Acceptance**: status=pending, updated_at refreshed; repeated failures keep the semantics.
-- **Tests**: after release, the chunk can be claimed again.
+- **Content**: return a failed claim to `pending`.
+- **Design**: `release_chunk(chunk, now)`; `UPDATE chunk SET status='pending', updated_at=? WHERE id=? AND status='extracting'` (clock injected). Rows affected 1 → released. Rows affected 0 → idempotent `Ok` when the row exists (already pending / done / failed are never resurrected), `NotFound` when it does not.
+- **Acceptance**: status=pending, updated_at refreshed; repeated failures keep the semantics; a second release is a no-op; `done` / `failed` rows stay untouched.
+- **Tests**: after release the chunk can be claimed again; repeated release; done/failed untouched; missing chunk → `NotFound`.
 
 ## P1-7 Extraction Call
 

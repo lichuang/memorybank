@@ -2,17 +2,12 @@
 
 use engine::Error;
 use engine::ports::{NewChunk, Store};
-use engine::types::{
-  Bank, BankId, BankProfile, ChunkId, Source, SourceId, SourceStatus, Timestamp,
-};
+use engine::testing::timestamp;
+use engine::types::{Bank, BankId, BankProfile, ChunkId, Source, SourceId, SourceStatus};
 use store::SqliteStore;
 use store::testing::memory_pool;
 
 const SOURCE_TIME: i64 = 1_000;
-
-fn ts(millis: i64) -> Timestamp {
-  Timestamp::from_timestamp_millis(millis).expect("valid timestamp")
-}
 
 fn bank() -> Bank {
   Bank {
@@ -25,8 +20,8 @@ fn bank() -> Bank {
       empathy: 3,
       bias_strength: 0.5,
     },
-    created_at: ts(SOURCE_TIME),
-    updated_at: ts(SOURCE_TIME),
+    created_at: timestamp(SOURCE_TIME),
+    updated_at: timestamp(SOURCE_TIME),
   }
 }
 
@@ -37,8 +32,8 @@ fn source(bank_id: BankId, payload: &str) -> Source {
     title: None,
     payload_text: payload.into(),
     status: SourceStatus::Received,
-    created_at: ts(SOURCE_TIME),
-    updated_at: ts(SOURCE_TIME),
+    created_at: timestamp(SOURCE_TIME),
+    updated_at: timestamp(SOURCE_TIME),
   }
 }
 
@@ -58,7 +53,7 @@ fn chunk(
     content_hash: hash.into(),
     time_start: None,
     time_end: None,
-    created_at: ts(created_at),
+    created_at: timestamp(created_at),
   }
 }
 
@@ -277,8 +272,8 @@ async fn chunk_fields_are_persisted_verbatim() {
   let (store, bank, source) = setup().await;
   let mut chunk = chunk(bank.id, source.id, 7, "hash-7", 5_000);
   chunk.text = "verbatim slice\nwith newline".into();
-  chunk.time_start = Some(ts(4_000));
-  chunk.time_end = Some(ts(5_000));
+  chunk.time_start = Some(timestamp(4_000));
+  chunk.time_end = Some(timestamp(5_000));
 
   store
     .append_chunks(source.id, vec![chunk.clone()])

@@ -2,6 +2,7 @@
 
 use engine::Error;
 use engine::ports::Store;
+use engine::testing::timestamp;
 use engine::types::{Bank, BankId, BankProfile, Source, SourceId, SourceStatus, Timestamp};
 use store::SqliteStore;
 use store::testing::memory_pool;
@@ -9,7 +10,7 @@ use store::testing::memory_pool;
 const NOW_MILLIS: i64 = 1_700_000_000_123;
 
 fn now() -> Timestamp {
-  Timestamp::from_timestamp_millis(NOW_MILLIS).expect("valid timestamp")
+  timestamp(NOW_MILLIS)
 }
 
 fn profile() -> BankProfile {
