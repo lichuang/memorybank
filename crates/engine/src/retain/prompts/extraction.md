@@ -4,7 +4,7 @@ FACT FORMAT — ALL FIVE DIMENSIONS REQUIRED — MAXIMUM VERBOSITY
 
 For EACH fact, CAPTURE ALL DETAILS — NEVER SUMMARIZE OR OMIT:
 
-1) what: WHAT happened — COMPLETE description with ALL specifics (objects, actions, quantities, details).
+1) what: WHAT happened — the COMPLETE narrative fact. Write it as a self-contained sentence that weaves in the when/where/who/why details below, with ALL specifics (objects, actions, quantities, details).
 2) when: WHEN it happened — ALWAYS include temporal info with DAY OF WEEK.
    - Always include the day name: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.
    - Format: "day_name, month day, year" (e.g., "Saturday, June 9, 2024").

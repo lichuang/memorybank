@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 7/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (19/66 total)**
+> Current progress: **P0 12/12 · P1 8/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (20/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -400,18 +400,22 @@ pub fn validate_extracted(f: &ExtractedFact) -> Option<&'static str>   // reason
 
 ## P1-8 Time and Augmented Text
 
-**Status**: ❌
+**Status**: ✅ (2026-10-29)
 
 - **Content**: time normalization + human-readable prefix + embedding-input assembly.
 - **Design**:
 ```rust
-pub fn normalize_time(extracted:&mut ExtractedFact, chunk:&Chunk, clock:&dyn Clock) -> Result<()>
-// missing occurred → use chunk.time_start/end; missing mentioned_at → chunk interval midpoint / creation time
-pub fn human_readable(ts: Timestamp) -> String            // "Saturday, June 9, 2024"
-pub fn embedding_input(text:&str, ts: Option<Timestamp>) -> String  // "{human}. {text}"
+pub fn normalize_time(extracted:&mut ExtractedFact, chunk:&Chunk)
+// occurred_start/end ← chunk.time_start/time_end when missing;
+// mentioned_at ← chunk midpoint (or its only bound); never clock.now()
+pub fn human_readable(ts: Timestamp) -> String            // "Sunday, June 9, 2024" (no padding)
+pub fn augmented_text(narrative:&str, ts: Option<Timestamp>) -> String  // "{human}. {narrative}" / narrative
+pub fn fact_text(extracted:&ExtractedFact) -> String      // what + mentioned_at prefix
 ```
-- **Acceptance**: never fabricate time (None stays None); stored text == embedding input (the same string).
-- **Tests**: relative times are already normalized by the LLM (this step only fills defaults); prefix format.
+- **Composition**: `fact.text = what`; the A.1 prompt now requires `what` to be the complete narrative that weaves in when/where/who/why. The stored text is already augmented: `fact_text` is both `fact.text` and the embedding/reranker input (one string across all paths, schema §7.A#1).
+- **No fabrication**: without a chunk interval all three times stay `None`; `occurred_end` is never synthesized from `occurred_start`.
+- **Acceptance**: never fabricate time (None stays None); stored text == embedding input (the same string); prefix format `"<weekday>, <month> <day>, <year>. "`.
+- **Tests**: fill from chunk bounds; midpoint; single-bound fallback; user-supplied times untouched; no chunk times → all None; human-readable format (weekday correctness); prefix only when a time exists; `fact_text` composition.
 
 ## P1-9 Entity Resolution ρ
 
