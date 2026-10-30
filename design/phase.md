@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 8/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (20/66 total)**
+> Current progress: **P0 12/12 · P1 9/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (21/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -186,7 +186,7 @@ pub struct WorkLists { pub sources_received: Vec<SourceId>, pub chunks_pending: 
 pub enum NeighborKind { Temporal, Semantic, Causal, Entity }
 pub struct Neighbor { pub fact_id: FactId, pub kind: NeighborKind, pub weight: f32 }
 pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
-  pub last_mention_at: Option<Timestamp> }
+  pub co_mentioned: Vec<EntityId>, pub last_mention_at: Option<Timestamp> }
 
 #[async_trait] pub trait Store: Send+Sync {
   // bank / inbox
@@ -206,7 +206,7 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
   async fn increment_access(&self, ids:&[FactId])->Result<()>;
   // entity / opinion / observation / maintenance
   async fn ensure_entity(&self, new:NewEntity)->Result<(EntityId,bool)>;   // (id, created)
-  async fn entity_candidates(&self, bank:BankId, mention:&str)->Result<Vec<EntityCandidate>>;
+  async fn entity_candidates(&self, bank:BankId, mention:&str, limit:usize)->Result<Vec<EntityCandidate>>;
   async fn insert_opinion(&self, o:NewOpinion)->Result<()>;
   async fn insert_observations(&self, o:Vec<NewObservation>)->Result<()>;
   async fn observations_of(&self, bank:BankId, entity:EntityId, limit:usize)->Result<Vec<Fact>>;
@@ -419,22 +419,27 @@ pub fn fact_text(extracted:&ExtractedFact) -> String      // what + mentioned_at
 
 ## P1-9 Entity Resolution ρ
 
-**Status**: ❌
+**Status**: ✅ (2026-10-29)
 
 - **Content**: exact hit → three-feature fuzzy match → ensure_entity.
 - **Design**:
 ```rust
-pub struct ResolveWeights { pub alpha: f32, pub beta: f32, pub gamma: f32, pub threshold: f32 }
+pub struct ResolveWeights { pub alpha: f32, pub beta: f32, pub gamma: f32,
+  pub threshold: f32, pub temporal_scale: Duration, pub candidate_limit: usize }
+// defaults: 0.6 / 0.2 / 0.2 / 0.75 / 30 days / 500
 pub struct MentionContext { pub co_mentioned: Vec<EntityId>, pub at: Option<Timestamp> }
 pub async fn resolve(store:&dyn Store, bank:BankId, mention:&EntityMention,
-                     ctx:&MentionContext, w:&ResolveWeights) -> Result<EntityId>
-pub fn normalize_name(s:&str)->String                    // lowercase/trim/whitespace collapse
-pub fn string_sim(a:&str,b:&str)->f32                    // normalized Levenshtein similarity
-pub fn cooccurrence_sim(cand:&EntityCandidate, ctx:&MentionContext)->f32
-pub fn temporal_sim(cand:&EntityCandidate, at: Option<Timestamp>)->f32
+                     ctx:&MentionContext, w:&ResolveWeights, now:Timestamp) -> Result<EntityId>
+pub fn normalize_name(s:&str)->String                 // lowercase, trim, collapse whitespace
+pub fn string_sim(a:&str,b:&str)->f32                 // 1 - levenshtein / max_len (chars)
+pub fn cooccurrence_sim(cand:&EntityCandidate, ctx:&MentionContext)->f32  // overlap coefficient
+pub fn temporal_sim(cand:&EntityCandidate, at:Option<Timestamp>, scale:Duration)->f32 // exp(-Δt/scale)
 ```
-- **Acceptance**: the same mention always resolves to the same entity; creation conflicts fall back to `ensure_entity`'s UNIQUE.
-- **Tests**: exact/variant/new-entity paths; concurrent creation of the same name yields one row; empty mention rejected.
+- **Candidate shortlist** (`Store::entity_candidates(bank, mention, limit)`): exact canonical-name and `mention_text` variant matches first, then the bank's top entities by `mention_count`, capped at `limit`. `EntityCandidate.co_mentioned` is a bounded sample of entities sharing a fact with the candidate (fact ids are UUIDv7, so recent-first). Fuzzy scoring runs on this shortlist; `sim_str` takes the best score over the canonical name and all variants.
+- **Scoring**: weighted sum over **available** features, divided by the sum of their weights (a missing co-occurrence/temporal signal does not depress the score). Empty mention after normalization → `Error::Config`.
+- **Creation**: below the threshold → `ensure_entity(NewEntity)`; `INSERT … ON CONFLICT(bank_id, canonical_name) DO NOTHING` plus a read-back makes concurrent creation return one row. `entity_type = mention.kind.unwrap_or(Other)`; `created_at = now` (the only clock use).
+- **Acceptance**: the same mention always resolves to the same entity; creation conflicts fall back to `ensure_entity`'s UNIQUE; empty mention rejected.
+- **Tests**: exact/fuzzy-typo/threshold/new-entity paths; variant and co-mention candidates; candidate ordering and limit; empty mention; concurrent creation of the same name yields one row.
 
 ## P1-10 Entity Statistics
 

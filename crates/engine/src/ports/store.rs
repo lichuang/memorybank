@@ -109,9 +109,15 @@ pub trait Store: Send + Sync {
   /// row was created.
   async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)>;
 
-  /// Candidate entities for a mention: exact-name hits plus variants aggregated
-  /// from `fact_entity.mention_text`, with the most recent mention time.
-  async fn entity_candidates(&self, bank: BankId, mention: &str) -> Result<Vec<EntityCandidate>>;
+  /// Candidate entities for a mention: exact-name hits, entities with a matching
+  /// `mention_text` variant, and the bank's top `limit` entities by
+  /// `mention_count` (so fuzzy scoring has a bounded shortlist).
+  async fn entity_candidates(
+    &self,
+    bank: BankId,
+    mention: &str,
+    limit: usize,
+  ) -> Result<Vec<EntityCandidate>>;
 
   /// Writes an opinion row and its `fact_entity` bindings in one transaction.
   async fn insert_opinion(&self, opinion: NewOpinion) -> Result<()>;
@@ -408,6 +414,9 @@ pub struct EntityCandidate {
   pub entity: Entity,
   /// Mention variants aggregated from `fact_entity.mention_text`.
   pub variants: Vec<String>,
+  /// Entities that appeared in the same facts as this one (bounded sample),
+  /// used by the co-occurrence feature of entity resolution.
+  pub co_mentioned: Vec<EntityId>,
   /// Most recent mention time across the variants.
   pub last_mention_at: Option<Timestamp>,
 }
@@ -487,6 +496,7 @@ mod tests {
       &self,
       _bank: BankId,
       _mention: &str,
+      _limit: usize,
     ) -> Result<Vec<EntityCandidate>> {
       unreachable!("stub")
     }

@@ -5,6 +5,7 @@
 //! [`Error::Fatal`] instead of panicking, so an accidental call is visible as an
 //! error rather than a crash.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,11 +14,11 @@ use engine::ports::{
   NewOpinion, Store, WorkLists,
 };
 use engine::types::{
-  Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, EntityId, Fact, FactId, Source, SourceId,
-  TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
+  Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, Entity, EntityId, EntityKind, Fact,
+  FactId, Source, SourceId, TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
 };
 use engine::{Error, Result};
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use super::error::{map_read, map_write};
 use super::time::duration_millis;
@@ -306,12 +307,185 @@ impl Store for SqliteStore {
     Err(not_implemented("increment_access"))
   }
 
-  async fn ensure_entity(&self, _new: NewEntity) -> Result<(EntityId, bool)> {
-    Err(not_implemented("ensure_entity"))
+  async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)> {
+    if new.canonical_name.trim().is_empty() {
+      return Err(Error::config(
+        "ensure_entity: canonical_name must not be empty",
+      ));
+    }
+
+    let inserted = sqlx::query(
+      "INSERT INTO entity (id, bank_id, canonical_name, entity_type, mention_count, \
+       first_seen, last_seen, attrs, created_at, updated_at) \
+       VALUES (?, ?, ?, ?, 0, NULL, NULL, NULL, ?, ?) \
+       ON CONFLICT(bank_id, canonical_name) DO NOTHING",
+    )
+    .bind(new.id.to_string())
+    .bind(new.bank_id.to_string())
+    .bind(&new.canonical_name)
+    .bind(new.entity_type.as_str())
+    .bind(to_epoch_millis(new.created_at))
+    .bind(to_epoch_millis(new.created_at))
+    .execute(&self.pool)
+    .await
+    .map_err(|error| map_write("entity", error))?;
+
+    if inserted.rows_affected() == 1 {
+      return Ok((new.id, true));
+    }
+
+    let existing: Option<String> =
+      sqlx::query_scalar("SELECT id FROM entity WHERE bank_id = ? AND canonical_name = ?")
+        .bind(new.bank_id.to_string())
+        .bind(&new.canonical_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| map_read("entity", error))?;
+
+    match existing {
+      Some(id) => {
+        let id = EntityId::parse(&id)
+          .map_err(|error| Error::fatal(format!("corrupt entity id `{id}`: {error}")))?;
+        Ok((id, false))
+      }
+      None => Err(Error::fatal(
+        "entity conflict reported but no existing row was found",
+      )),
+    }
   }
 
-  async fn entity_candidates(&self, _bank: BankId, _mention: &str) -> Result<Vec<EntityCandidate>> {
-    Err(not_implemented("entity_candidates"))
+  async fn entity_candidates(
+    &self,
+    bank: BankId,
+    mention: &str,
+    limit: usize,
+  ) -> Result<Vec<EntityCandidate>> {
+    let limit = limit.max(1);
+    let bank_text = bank.to_string();
+
+    // Exact canonical-name and variant matches first, then the bank's top
+    // entities by mention_count so fuzzy scoring still sees new spellings.
+    let mut rows: Vec<EntityRow> = sqlx::query_as::<_, EntityRow>(
+      "SELECT e.id, e.bank_id, e.canonical_name, e.entity_type, e.mention_count, \
+              e.first_seen, e.last_seen, e.attrs, e.created_at, e.updated_at \
+       FROM entity e \
+       WHERE e.bank_id = ? \
+         AND (e.canonical_name = ? OR EXISTS ( \
+           SELECT 1 FROM fact_entity fe \
+           WHERE fe.entity_id = e.id AND fe.bank_id = e.bank_id \
+             AND lower(trim(fe.mention_text)) = ?)) \
+       ORDER BY e.mention_count DESC, e.id LIMIT ?",
+    )
+    .bind(&bank_text)
+    .bind(mention)
+    .bind(mention)
+    .bind(limit as i64)
+    .fetch_all(&self.pool)
+    .await
+    .map_err(|error| map_read("entity", error))?;
+
+    let top: Vec<EntityRow> = sqlx::query_as::<_, EntityRow>(
+      "SELECT id, bank_id, canonical_name, entity_type, mention_count, first_seen, last_seen, \
+              attrs, created_at, updated_at \
+       FROM entity WHERE bank_id = ? ORDER BY mention_count DESC, id LIMIT ?",
+    )
+    .bind(&bank_text)
+    .bind(limit as i64)
+    .fetch_all(&self.pool)
+    .await
+    .map_err(|error| map_read("entity", error))?;
+
+    let mut seen: HashSet<String> = HashSet::new();
+    rows.retain(|row| seen.insert(row.0.clone()));
+    for row in top {
+      if rows.len() >= limit {
+        break;
+      }
+      if seen.insert(row.0.clone()) {
+        rows.push(row);
+      }
+    }
+    rows.truncate(limit);
+
+    if rows.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let ids: Vec<String> = rows.iter().map(|row| row.0.clone()).collect();
+
+    let mut variants_query = QueryBuilder::<Sqlite>::new(
+      "SELECT entity_id, mention_text FROM fact_entity WHERE bank_id = ",
+    );
+    variants_query.push_bind(&bank_text);
+    variants_query.push(" AND entity_id IN (");
+    let mut separated = variants_query.separated(", ");
+    for id in &ids {
+      separated.push_bind(id.clone());
+    }
+    variants_query.push(") AND mention_text IS NOT NULL");
+    let variant_rows: Vec<(String, String)> = variants_query
+      .build_query_as()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("entity", error))?;
+
+    let mut co_query = QueryBuilder::<Sqlite>::new(
+      "SELECT fe1.entity_id, fe2.entity_id FROM fact_entity fe1 \
+       JOIN fact_entity fe2 ON fe2.fact_id = fe1.fact_id AND fe2.entity_id <> fe1.entity_id \
+       WHERE fe1.bank_id = ",
+    );
+    co_query.push_bind(&bank_text);
+    co_query.push(" AND fe1.entity_id IN (");
+    let mut separated = co_query.separated(", ");
+    for id in &ids {
+      separated.push_bind(id.clone());
+    }
+    // Bounded sample; fact ids are UUIDv7, so descending order is recent-first.
+    co_query.push(") ORDER BY fe1.fact_id DESC LIMIT 20000");
+    let co_rows: Vec<(String, String)> = co_query
+      .build_query_as()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("entity", error))?;
+
+    let mut variants: HashMap<String, Vec<String>> = HashMap::new();
+    for (entity, text) in variant_rows {
+      variants.entry(entity).or_default().push(text);
+    }
+    for values in variants.values_mut() {
+      values.sort();
+      values.dedup();
+    }
+
+    let mut co_mentioned: HashMap<String, Vec<String>> = HashMap::new();
+    for (entity, other) in co_rows {
+      co_mentioned.entry(entity).or_default().push(other);
+    }
+
+    let mut candidates = Vec::with_capacity(rows.len());
+    for row in rows {
+      let id_text = row.0.clone();
+      let entity = entity_from_row(row)?;
+      let last_mention_at = entity.last_seen;
+      let co_mentioned = co_mentioned
+        .remove(&id_text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| {
+          EntityId::parse(&value)
+            .map_err(|error| Error::fatal(format!("corrupt entity id `{value}`: {error}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+      candidates.push(EntityCandidate {
+        entity,
+        variants: variants.remove(&id_text).unwrap_or_default(),
+        co_mentioned,
+        last_mention_at,
+      });
+    }
+
+    Ok(candidates)
   }
 
   async fn insert_opinion(&self, _opinion: NewOpinion) -> Result<()> {
@@ -404,6 +578,57 @@ fn chunk_from_row(row: ChunkRow) -> Result<Chunk> {
       .map_err(|error| Error::fatal(error.to_string()))?,
     time_start: time_start.map(timestamp).transpose()?,
     time_end: time_end.map(timestamp).transpose()?,
+    created_at: timestamp(created_at)?,
+    updated_at: timestamp(updated_at)?,
+  })
+}
+
+type EntityRow = (
+  String,
+  String,
+  String,
+  String,
+  i64,
+  Option<i64>,
+  Option<i64>,
+  Option<String>,
+  i64,
+  i64,
+);
+
+fn entity_from_row(row: EntityRow) -> Result<Entity> {
+  let (
+    id,
+    bank_id,
+    canonical_name,
+    entity_type,
+    mention_count,
+    first_seen,
+    last_seen,
+    attrs,
+    created_at,
+    updated_at,
+  ) = row;
+
+  Ok(Entity {
+    id: EntityId::parse(&id)
+      .map_err(|error| Error::fatal(format!("corrupt entity id `{id}`: {error}")))?,
+    bank_id: BankId::parse(&bank_id)
+      .map_err(|error| Error::fatal(format!("corrupt bank id `{bank_id}`: {error}")))?,
+    canonical_name,
+    entity_type: entity_type
+      .parse::<EntityKind>()
+      .map_err(|error| Error::fatal(error.to_string()))?,
+    mention_count: u32::try_from(mention_count)
+      .map_err(|_| Error::fatal(format!("corrupt mention count `{mention_count}`")))?,
+    first_seen: first_seen.map(timestamp).transpose()?,
+    last_seen: last_seen.map(timestamp).transpose()?,
+    attrs: attrs
+      .map(|text| {
+        serde_json::from_str(&text)
+          .map_err(|error| Error::fatal(format!("corrupt entity attrs: {error}")))
+      })
+      .transpose()?,
     created_at: timestamp(created_at)?,
     updated_at: timestamp(updated_at)?,
   })

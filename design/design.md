@@ -125,7 +125,7 @@ pub trait Store: Send + Sync {
 
     // —— Entity / opinion / observation / maintenance ——
     async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)>;               // (id, created); UNIQUE conflict reuses
-    async fn entity_candidates(&self, bank: BankId, mention: &str) -> Result<Vec<EntityCandidate>>;
+    async fn entity_candidates(&self, bank: BankId, mention: &str, limit: usize) -> Result<Vec<EntityCandidate>>;
     async fn insert_opinion(&self, op: NewOpinion) -> Result<()>;
     async fn insert_observations(&self, obs: Vec<NewObservation>) -> Result<()>;
     async fn observations_of(&self, bank: BankId, entity: EntityId, limit: usize) -> Result<Vec<Fact>>;

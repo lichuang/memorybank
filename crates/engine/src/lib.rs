@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod ports;
+pub mod resolve;
 pub mod retain;
 pub mod testing;
 pub mod tokens;
