@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 10/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (22/66 total)**
+> Current progress: **P0 12/12 · P1 11/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (23/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -464,12 +464,27 @@ pub fn temporal_sim(cand:&EntityCandidate, at:Option<Timestamp>, scale:Duration)
 
 ## P1-11 Embedding Generation
 
-**Status**: ❌
+**Status**: ✅ (2026-10-30)
 
 - **Content**: batch embedding + dimension validation + failure degradation.
-- **Design**: `pub async fn embed_facts(emb:&dyn Embedder, texts:&[String], batch:usize) -> Vec<Option<Vec<f32>>>`; validate `len==dim()`; failure becomes None (runtime backfill).
-- **Acceptance**: dimension mismatch is a Config error; failure does not block tx2.
-- **Tests**: batch splitting; single-batch failure → None rows.
+- **Design**: `pub async fn embed_facts(emb:&dyn Embedder, texts:&[String], batch:usize)
+  -> Result<Vec<TextEmbedding>>` with
+  `pub enum TextEmbedding { Vector(Vec<f32>), Failed }`; `TextEmbedding::into_option()`
+  converts to the storage shape (`None` = backfill later). Splits inputs with
+  `chunks(batch)` and preserves order. Provider `Retryable`/`Fatal` errors mark that
+  batch `Failed` and log a warning; later batches still run, and the rows are backfilled
+  from `facts_missing_embedding`, so a model outage never blocks tx2. A provider
+  `Config` error is returned immediately — silently emitting null embeddings would hide
+  a broken setup. A vector whose length differs from `Embedder::dim()` is
+  `Error::Config` (writing it would poison vector search); a provider returning a
+  different number of vectors than the batch size is `Error::Fatal` (outputs cannot be
+  aligned with the texts). `batch == 0` → `Config`; empty input skips the provider.
+- **Acceptance**: dimension mismatch is a Config error; failure does not block tx2;
+  output length and order match the input.
+- **Tests**: batch splitting and order preservation; single-batch `Retryable` failure →
+  `Failed` slots while later batches continue; `Fatal` also degrades; provider `Config`
+  aborts before later batches; storage conversion; dimension mismatch; vector-count
+  mismatch; zero batch; empty input.
 
 ## P1-12 Temporal Link Construction
 

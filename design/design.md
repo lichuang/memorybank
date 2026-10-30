@@ -81,7 +81,7 @@ impl<T: Llm + ?Sized> LlmExt for T { /* raw JSON → T; parse failure → Error:
 - **HTTP-compatible (default)**: the `llm` adapter is an OpenAI-compatible client; Ollama, vLLM, llama.cpp's server, SGLang, and LM Studio all expose compatible endpoints, so a local model usually needs configuration (`base_url`, `model`, optional `api_key`, timeout), not new code.
 - **In-process (optional feature, e.g. `llm/local`)**: candle / ONNX Runtime / mistral.rs adapters implement `Llm` and `Embedder` directly. Inference is blocking GPU/CPU work, so it must run on `spawn_blocking` or a dedicated worker pool with bounded concurrency — never on the async runtime thread. Heavy model dependencies stay behind the feature flag so the default build stays light.
 
-Local-specific concerns that stay inside adapters: timeout and retry policy (`Retryable` for transient failures), batch size for embeddings, dimension matching (`Embedder::dim`), grammar/guided decoding where available (GBNF, guided JSON), and schema rendering when `supports_json_schema()` is `false`. None of this changes the schema or the engine.
+Local-specific concerns that stay inside adapters: timeout and retry policy (`Retryable` for transient failures), batch size for embeddings, adapter-side model dimension matching (the engine additionally validates every returned vector against `Embedder::dim`), grammar/guided decoding where available (GBNF, guided JSON), and schema rendering when `supports_json_schema()` is `false`. None of this changes the schema or the engine.
 
 #[async_trait]
 pub trait Embedder: Send + Sync {
