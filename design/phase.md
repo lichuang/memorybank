@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 9/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (21/66 total)**
+> Current progress: **P0 12/12 · P1 10/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (22/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -443,12 +443,24 @@ pub fn temporal_sim(cand:&EntityCandidate, at:Option<Timestamp>, scale:Duration)
 
 ## P1-10 Entity Statistics
 
-**Status**: ❌
+**Status**: ✅ (2026-10-30)
 
 - **Content**: apply `EntityStatUpdate` inside the commit.
-- **Design**: `mention_count += 1`; `first_seen = min`; `last_seen = max` (conversation clock).
-- **Acceptance**: consistent with the binding-row count (tests assert COUNT).
-- **Tests**: insert/re-extraction replace (−1/+1); NULL time does not update seen.
+- **Design**: a store-internal
+  `apply_entity_stats(&mut Transaction, bank, &[EntityStatUpdate])` stage, called by
+  `commit_chunk` (P1-16) after the binding writes, inside the same transaction.
+  `add=true` → `mention_count += 1`; `add=false` → `mention_count -= 1`, floored at 0
+  (`CHECK (mention_count >= 0)`). On inserts, `at=Some` moves `first_seen`/`last_seen`
+  to the min/max; `at=None` leaves both untouched. Deletions never move the seen
+  bounds, even when they carry a time (the bounds are history, not a live recount).
+  A zero-row update (unknown entity or an entity from another bank) is
+  `Error::Fatal`: the commit references data it does not own, and tx2 must roll back.
+- **Acceptance**: statistics stay consistent with the binding-row count (tests assert
+  `COUNT(* FROM fact_entity)`); a failed update aborts the caller's transaction with
+  no partial rows; `first_seen`/`last_seen` follow add-time only.
+- **Tests**: count/bounds on add; earlier/later adds move the bounds; removal floors
+  at zero and never rewinds the bounds; `None` time leaves the bounds; unknown entity
+  and wrong bank are fatal and roll back; count equals the binding count.
 
 ## P1-11 Embedding Generation
 

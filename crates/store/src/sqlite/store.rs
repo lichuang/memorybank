@@ -10,15 +10,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use engine::ports::{
-  ChunkCommit, ClaimedChunk, EntityCandidate, Neighbor, NewChunk, NewEntity, NewObservation,
-  NewOpinion, Store, WorkLists,
+  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NewChunk, NewEntity,
+  NewObservation, NewOpinion, Store, WorkLists,
 };
 use engine::types::{
   Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, Entity, EntityId, EntityKind, Fact,
   FactId, Source, SourceId, TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
 };
 use engine::{Error, Result};
-use sqlx::{QueryBuilder, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
 
 use super::error::{map_read, map_write};
 use super::time::duration_millis;
@@ -529,6 +529,76 @@ impl Store for SqliteStore {
   }
 }
 
+/// Applies entity evidence deltas inside the caller's tx2 transaction.
+///
+/// `mention_count` counts world/experience bindings only, so the caller supplies
+/// one update per binding insert or delete. Deletions decrement the counter but
+/// never rewind `first_seen`/`last_seen`: the bounds mean "first/last ever
+/// seen", so a re-extraction replacement cannot erase history. A zero-row update
+/// means the commit references an entity outside the chunk's bank; that is
+/// corrupt input, not a retryable condition.
+//
+// Wired into `commit_chunk` (P1-16); until then only the transaction tests call it.
+#[allow(dead_code)]
+async fn apply_entity_stats(
+  tx: &mut Transaction<'_, Sqlite>,
+  bank: BankId,
+  updates: &[EntityStatUpdate],
+) -> Result<()> {
+  for update in updates {
+    let delta = if update.add { 1_i64 } else { -1_i64 };
+    let updated_at = to_epoch_millis(update.updated_at);
+
+    // Deletions never touch the seen bounds, even when they carry a time: the
+    // bounds describe history, and a delete must not rewind them.
+    let affected = match (update.add, update.at) {
+      (true, Some(at)) => {
+        let at = to_epoch_millis(at);
+        sqlx::query(
+          "UPDATE entity \
+           SET mention_count = MAX(mention_count + ?, 0), \
+               first_seen = MIN(COALESCE(first_seen, ?), ?), \
+               last_seen = MAX(COALESCE(last_seen, ?), ?), \
+               updated_at = ? \
+           WHERE id = ? AND bank_id = ?",
+        )
+        .bind(delta)
+        .bind(at)
+        .bind(at)
+        .bind(at)
+        .bind(at)
+        .bind(updated_at)
+        .bind(update.entity_id.to_string())
+        .bind(bank.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| map_write("entity", error))?
+      }
+      _ => sqlx::query(
+        "UPDATE entity \
+           SET mention_count = MAX(mention_count + ?, 0), updated_at = ? \
+           WHERE id = ? AND bank_id = ?",
+      )
+      .bind(delta)
+      .bind(updated_at)
+      .bind(update.entity_id.to_string())
+      .bind(bank.to_string())
+      .execute(&mut **tx)
+      .await
+      .map_err(|error| map_write("entity", error))?,
+    };
+
+    if affected.rows_affected() == 0 {
+      return Err(Error::fatal(format!(
+        "entity stat update references entity {} outside bank {}",
+        update.entity_id, bank
+      )));
+    }
+  }
+
+  Ok(())
+}
+
 fn not_implemented(method: &str) -> Error {
   Error::fatal(format!("SqliteStore::{method} is not implemented yet"))
 }
@@ -644,4 +714,232 @@ fn level(field: &'static str, value: i64) -> Result<u8> {
     .ok()
     .filter(|value| (1..=5).contains(value))
     .ok_or_else(|| Error::fatal(format!("corrupt profile level `{field}` = {value}")))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::testing::memory_pool;
+
+  async fn create_entity(store: &SqliteStore, bank: BankId, name: &str) -> EntityId {
+    store
+      .ensure_entity(NewEntity {
+        id: EntityId::new(),
+        bank_id: bank,
+        canonical_name: name.into(),
+        entity_type: EntityKind::Person,
+        created_at: timestamp(0).expect("created_at"),
+      })
+      .await
+      .expect("create entity")
+      .0
+  }
+
+  fn update(entity_id: EntityId, add: bool, at: Option<i64>, updated_at: i64) -> EntityStatUpdate {
+    EntityStatUpdate {
+      entity_id,
+      add,
+      at: at.map(|millis| timestamp(millis).expect("at")),
+      updated_at: timestamp(updated_at).expect("updated_at"),
+    }
+  }
+
+  async fn apply(pool: &SqlitePool, bank: BankId, updates: &[EntityStatUpdate]) -> Result<()> {
+    let mut tx = pool.begin().await.expect("begin");
+    if let Err(error) = apply_entity_stats(&mut tx, bank, updates).await {
+      tx.rollback().await.expect("rollback");
+      return Err(error);
+    }
+    tx.commit().await.expect("commit");
+    Ok(())
+  }
+
+  async fn read_stats(pool: &SqlitePool, id: EntityId) -> (i64, Option<i64>, Option<i64>) {
+    sqlx::query_as("SELECT mention_count, first_seen, last_seen FROM entity WHERE id = ?")
+      .bind(id.to_string())
+      .fetch_one(pool)
+      .await
+      .expect("read stats")
+  }
+
+  #[tokio::test]
+  async fn add_tracks_count_and_seen_bounds() {
+    let pool = memory_pool().await.expect("pool");
+    let store = SqliteStore::new(pool.clone());
+    let bank = BankId::new();
+    let id = create_entity(&store, bank, "emily").await;
+
+    apply(&pool, bank, &[update(id, true, Some(1_000), 1_100)])
+      .await
+      .expect("add");
+    assert_eq!(read_stats(&pool, id).await, (1, Some(1_000), Some(1_000)));
+
+    apply(&pool, bank, &[update(id, true, Some(500), 1_200)])
+      .await
+      .expect("earlier add");
+    assert_eq!(read_stats(&pool, id).await, (2, Some(500), Some(1_000)));
+
+    apply(&pool, bank, &[update(id, true, Some(2_000), 1_300)])
+      .await
+      .expect("later add");
+    assert_eq!(read_stats(&pool, id).await, (3, Some(500), Some(2_000)));
+  }
+
+  #[tokio::test]
+  async fn remove_decrements_without_rewinding_bounds() {
+    let pool = memory_pool().await.expect("pool");
+    let store = SqliteStore::new(pool.clone());
+    let bank = BankId::new();
+    let id = create_entity(&store, bank, "emily").await;
+
+    apply(
+      &pool,
+      bank,
+      &[
+        update(id, true, Some(1_000), 1_000),
+        update(id, true, Some(2_000), 2_000),
+      ],
+    )
+    .await
+    .expect("add twice");
+    assert_eq!(read_stats(&pool, id).await, (2, Some(1_000), Some(2_000)));
+
+    apply(&pool, bank, &[update(id, false, Some(500), 3_000)])
+      .await
+      .expect("remove");
+    assert_eq!(
+      read_stats(&pool, id).await,
+      (1, Some(1_000), Some(2_000)),
+      "removal does not rewind the seen bounds, even with an earlier time"
+    );
+
+    apply(
+      &pool,
+      bank,
+      &[
+        update(id, false, None, 4_000),
+        update(id, false, None, 5_000),
+      ],
+    )
+    .await
+    .expect("remove below zero");
+    assert_eq!(
+      read_stats(&pool, id).await,
+      (0, Some(1_000), Some(2_000)),
+      "mention_count is floored at zero"
+    );
+  }
+
+  #[tokio::test]
+  async fn null_time_leaves_seen_bounds() {
+    let pool = memory_pool().await.expect("pool");
+    let store = SqliteStore::new(pool.clone());
+    let bank = BankId::new();
+    let id = create_entity(&store, bank, "emily").await;
+
+    apply(&pool, bank, &[update(id, true, None, 1_000)])
+      .await
+      .expect("add without time");
+    assert_eq!(read_stats(&pool, id).await, (1, None, None));
+
+    apply(&pool, bank, &[update(id, true, Some(1_000), 2_000)])
+      .await
+      .expect("add with time");
+    assert_eq!(read_stats(&pool, id).await, (2, Some(1_000), Some(1_000)));
+
+    apply(&pool, bank, &[update(id, false, None, 3_000)])
+      .await
+      .expect("remove without time");
+    assert_eq!(read_stats(&pool, id).await, (1, Some(1_000), Some(1_000)));
+  }
+
+  #[tokio::test]
+  async fn unknown_entity_is_fatal_and_rolls_back() {
+    let pool = memory_pool().await.expect("pool");
+    let store = SqliteStore::new(pool.clone());
+    let bank = BankId::new();
+    let id = create_entity(&store, bank, "emily").await;
+
+    let error = apply(
+      &pool,
+      bank,
+      &[
+        update(id, true, Some(1_000), 1_000),
+        update(EntityId::new(), true, Some(1_000), 1_000),
+      ],
+    )
+    .await
+    .expect_err("unknown entity");
+
+    assert!(matches!(error, Error::Fatal(_)), "error: {error}");
+    assert_eq!(
+      read_stats(&pool, id).await,
+      (0, None, None),
+      "the caller's transaction rolled back the earlier update"
+    );
+  }
+
+  #[tokio::test]
+  async fn entity_from_another_bank_is_fatal() {
+    let pool = memory_pool().await.expect("pool");
+    let store = SqliteStore::new(pool.clone());
+    let bank = BankId::new();
+    let id = create_entity(&store, bank, "emily").await;
+
+    let error = apply(
+      &pool,
+      BankId::new(),
+      &[update(id, true, Some(1_000), 1_000)],
+    )
+    .await
+    .expect_err("wrong bank");
+
+    assert!(matches!(error, Error::Fatal(_)), "error: {error}");
+    assert_eq!(read_stats(&pool, id).await, (0, None, None));
+  }
+
+  #[tokio::test]
+  async fn count_stays_consistent_with_evidence_bindings() {
+    let pool = memory_pool().await.expect("pool");
+    let store = SqliteStore::new(pool.clone());
+    let bank = BankId::new();
+    let id = create_entity(&store, bank, "emily").await;
+
+    let mut tx = pool.begin().await.expect("begin");
+    let mut updates = Vec::new();
+    for _ in 0..3 {
+      let fact = FactId::new();
+      sqlx::query(
+        "INSERT INTO fact (id, bank_id, fact_type, text, created_at, updated_at) \
+         VALUES (?, ?, 'world', 'fact', 0, 0)",
+      )
+      .bind(fact.to_string())
+      .bind(bank.to_string())
+      .execute(&mut *tx)
+      .await
+      .expect("insert fact");
+      sqlx::query(
+        "INSERT INTO fact_entity (bank_id, fact_id, entity_id, mention_text, created_at, updated_at) \
+         VALUES (?, ?, ?, 'Emily', 0, 0)",
+      )
+      .bind(bank.to_string())
+      .bind(fact.to_string())
+      .bind(id.to_string())
+      .execute(&mut *tx)
+      .await
+      .expect("insert binding");
+      updates.push(update(id, true, Some(1_000), 1_000));
+    }
+    apply_entity_stats(&mut tx, bank, &updates)
+      .await
+      .expect("apply stats");
+    tx.commit().await.expect("commit");
+
+    let bindings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact_entity WHERE entity_id = ?")
+      .bind(id.to_string())
+      .fetch_one(&pool)
+      .await
+      .expect("count bindings");
+    assert_eq!(read_stats(&pool, id).await.0, bindings);
+  }
 }

@@ -169,7 +169,7 @@ Conditional constraints:
 | `first_seen` / `last_seen` | `TS` nullable | first/most recent time the entity was mentioned by an evidence row. Uses the **conversation clock** (`fact.mentioned_at`, falling back to `fact.created_at`); same scope as mention_count (world/experience bindings) and maintained in the same transaction. Used for entity activity/freshness and observation staleness checks |
 | `attrs` | `JSON` nullable | resolution process info (merge history, scores, etc.) |
 
-> Statistics maintenance: binding writes/deletes (A1 extraction commit, re-extraction replacement) update mention_count and first_seen/last_seen in the same transaction; backends without strict transactions may drift, converging via rescan/maintenance jobs.
+> Statistics maintenance: binding writes update mention_count, first_seen, and last_seen in the same transaction (A1 extraction commit, re-extraction replacement); deletes decrement mention_count but never move or rewind the seen bounds (they record history); backends without strict transactions may drift, converging via rescan/maintenance jobs.
 
 ### 3.6 `fact_entity` — Fact ↔ Entity (N:M)
 
