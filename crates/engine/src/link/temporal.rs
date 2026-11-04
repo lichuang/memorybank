@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use crate::ports::{NewLink, Store};
 use crate::types::{
-  BankId, Fact, FactId, LinkId, LinkType, TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
+  BankId, Fact, FactId, LinkId, LinkType, OccurrenceInterval, TimeRange, Timestamp,
+  from_epoch_millis, to_epoch_millis,
 };
 use crate::{Error, Result};
 
@@ -244,26 +245,26 @@ pub async fn build_temporal_links(
   Ok(links)
 }
 
-/// A fact's occurrence interval, normalized so `start <= end`.
+/// A fact's occurrence interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Interval {
   start: i64,
   end: i64,
 }
 
-/// Returns `None` unless both occurrence bounds are present.
+/// Returns the closed span, or `None` for open/unknown occurrences.
+///
+/// Invalid combinations (reversed or end-only) cannot exist in a [`Fact`] —
+/// [`OccurrenceInterval`] rejects them at construction — so this function only
+/// distinguishes "has a closed interval" from "has no usable interval".
 fn interval(fact: &Fact) -> Option<Interval> {
-  let start = fact.occurred_start.map(to_epoch_millis)?;
-  let end = fact.occurred_end.map(to_epoch_millis)?;
-
-  Some(if end < start {
-    Interval {
-      start: end,
-      end: start,
-    }
-  } else {
-    Interval { start, end }
-  })
+  match fact.occurred {
+    OccurrenceInterval::Closed(span) => Some(Interval {
+      start: to_epoch_millis(span.start()),
+      end: to_epoch_millis(span.end()),
+    }),
+    OccurrenceInterval::Open { .. } | OccurrenceInterval::Unknown => None,
+  }
 }
 
 /// Empty span between two closed intervals; zero when they overlap or touch.
@@ -319,7 +320,7 @@ fn millis(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::types::FactType;
+  use crate::types::{ClosedInterval, FactType};
 
   fn fact(start: Option<i64>, end: Option<i64>) -> Fact {
     Fact {
@@ -329,8 +330,20 @@ mod tests {
       text: "fact".into(),
       embedding: None,
       chunk_id: None,
-      occurred_start: start.map(crate::testing::timestamp),
-      occurred_end: end.map(crate::testing::timestamp),
+      occurred: match (start, end) {
+        (Some(start), Some(end)) => OccurrenceInterval::Closed(
+          ClosedInterval::new(
+            crate::testing::timestamp(start),
+            crate::testing::timestamp(end),
+          )
+          .expect("ordered test interval"),
+        ),
+        (Some(start), None) => OccurrenceInterval::Open {
+          start: crate::testing::timestamp(start),
+        },
+        (None, None) => OccurrenceInterval::Unknown,
+        (None, Some(_)) => panic!("end without a start is not representable"),
+      },
       mentioned_at: None,
       confidence: None,
       access_count: 0,
@@ -433,19 +446,24 @@ mod tests {
   }
 
   #[test]
-  fn interval_requires_both_bounds_and_normalizes_order() {
-    assert!(interval(&fact(Some(1_000), None)).is_none());
-    assert!(interval(&fact(None, Some(1_000))).is_none());
-    assert!(interval(&fact(None, None)).is_none());
+  fn interval_requires_a_closed_span() {
+    assert!(
+      interval(&fact(Some(1_000), None)).is_none(),
+      "an open interval has no gap"
+    );
+    assert!(interval(&fact(None, None)).is_none(), "no time");
 
-    let reversed = interval(&fact(Some(2_000), Some(1_000))).expect("both bounds");
+    let closed = interval(&fact(Some(1_000), Some(2_000))).expect("closed");
     assert_eq!(
-      reversed,
+      closed,
       Interval {
         start: 1_000,
         end: 2_000
       }
     );
+
+    // Reversed and end-only intervals are not representable by `Fact`;
+    // `OccurrenceInterval` tests cover their rejection.
   }
 
   #[test]

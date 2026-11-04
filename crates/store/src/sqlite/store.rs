@@ -15,10 +15,12 @@ use engine::ports::{
 };
 use engine::types::{
   Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, Entity, EntityId, EntityKind, Fact,
-  FactId, FactType, Source, SourceId, TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
+  FactId, FactType, OccurrenceInterval, Source, SourceId, TimeRange, Timestamp, from_epoch_millis,
+  to_epoch_millis,
 };
 use engine::{Error, Result};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
+use tracing::warn;
 
 use super::error::{map_read, map_write};
 use super::time::duration_millis;
@@ -302,6 +304,7 @@ impl Store for SqliteStore {
     let rows: Vec<String> = sqlx::query_scalar(
       "SELECT id FROM fact \
        WHERE bank_id = ? AND occurred_start IS NOT NULL \
+         AND (occurred_end IS NULL OR occurred_end >= occurred_start) \
          AND occurred_start <= ? \
          AND (occurred_end IS NULL OR occurred_end >= ?) \
        ORDER BY occurred_start, id",
@@ -343,7 +346,14 @@ impl Store for SqliteStore {
       .await
       .map_err(|error| map_read("fact", error))?;
 
-    rows.into_iter().map(fact_from_row).collect()
+    let mut facts = Vec::with_capacity(rows.len());
+    for row in rows {
+      if let Some(fact) = fact_from_row(row)? {
+        facts.push(fact);
+      }
+    }
+
+    Ok(facts)
   }
 
   async fn increment_access(&self, _ids: &[FactId]) -> Result<()> {
@@ -764,7 +774,7 @@ type FactRow = (
   i64,
 );
 
-fn fact_from_row(row: FactRow) -> Result<Fact> {
+fn fact_from_row(row: FactRow) -> Result<Option<Fact>> {
   let (
     id,
     bank_id,
@@ -782,9 +792,29 @@ fn fact_from_row(row: FactRow) -> Result<Fact> {
     updated_at,
   ) = row;
 
-  Ok(Fact {
-    id: FactId::parse(&id)
-      .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?,
+  let id =
+    FactId::parse(&id).map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
+
+  // Invalid occurrence bounds (legacy or externally written rows) make this
+  // single fact unusable, but must not fail the whole read: skip it with a
+  // warning and keep the other rows.
+  let occurred = match OccurrenceInterval::from_parts(
+    occurred_start.map(timestamp).transpose()?,
+    occurred_end.map(timestamp).transpose()?,
+  ) {
+    Ok(occurred) => occurred,
+    Err(error) => {
+      warn!(
+        fact = %id,
+        %error,
+        "skipping fact row with an invalid occurrence interval"
+      );
+      return Ok(None);
+    }
+  };
+
+  Ok(Some(Fact {
+    id,
     bank_id: BankId::parse(&bank_id)
       .map_err(|error| Error::fatal(format!("corrupt bank id `{bank_id}`: {error}")))?,
     fact_type: fact_type
@@ -798,8 +828,7 @@ fn fact_from_row(row: FactRow) -> Result<Fact> {
           .map_err(|error| Error::fatal(format!("corrupt chunk id `{value}`: {error}")))
       })
       .transpose()?,
-    occurred_start: occurred_start.map(timestamp).transpose()?,
-    occurred_end: occurred_end.map(timestamp).transpose()?,
+    occurred,
     mentioned_at: mentioned_at.map(timestamp).transpose()?,
     confidence: confidence.map(|value| value as f32),
     access_count: u32::try_from(access_count)
@@ -812,7 +841,7 @@ fn fact_from_row(row: FactRow) -> Result<Fact> {
       .transpose()?,
     created_at: timestamp(created_at)?,
     updated_at: timestamp(updated_at)?,
-  })
+  }))
 }
 
 /// Decodes a little-endian `f32` BLOB.

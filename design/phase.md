@@ -69,8 +69,11 @@ pub struct Bank { id, name: String, profile: BankProfile, created_at, updated_at
 pub struct Source { id, bank_id, title: Option<String>, payload_text: String, status, created_at, updated_at }
 pub struct Chunk { id, bank_id, source_id, chunk_index: u32, text: String, content_hash: String,
                    status: ChunkStatus, time_start: Option<Timestamp>, time_end: Option<Timestamp>, created_at, updated_at }
+pub struct ClosedInterval { /* private */ start: Timestamp, end: Timestamp }   // new() rejects start > end
+pub enum OccurrenceInterval { Closed(ClosedInterval), Open { start: Timestamp }, Unknown }
 pub struct Fact { id, bank_id, fact_type: FactType, text: String, chunk_id: Option<ChunkId>,
-                  embedding: Option<Vec<f32>>, occurred_start/occurred_end/mentioned_at: Option<Timestamp>,
+                  embedding: Option<Vec<f32>>, occurred: OccurrenceInterval,
+                  mentioned_at: Option<Timestamp>,
                   confidence: Option<f32>, access_count: u32, created_at, updated_at }
 pub struct Entity { id, bank_id, canonical_name: String, kind: EntityKind,
                     mention_count: u32, first_seen/last_seen: Option<Timestamp>, created_at, updated_at }
@@ -160,7 +163,7 @@ pub struct NewChunk { pub id: ChunkId, pub bank_id: BankId, pub source_id: Sourc
 pub struct ClaimedChunk { pub chunk: Chunk }                        // status = Extracting
 pub struct NewFact { pub id: FactId, pub bank_id: BankId, pub fact_type: FactType,
   pub text: String, pub chunk_id: Option<ChunkId>, pub embedding: Option<Vec<f32>>,
-  pub occurred_start/occurred_end/mentioned_at: Option<Timestamp>,
+  pub occurred: OccurrenceInterval, pub mentioned_at: Option<Timestamp>,
   pub confidence: Option<f32>, pub attrs: Option<serde_json::Value>, pub created_at: Timestamp }
 pub struct NewBinding { pub bank_id: BankId, pub fact_id: FactId, pub entity_id: EntityId,
   pub mention_text: Option<String>, pub created_at: Timestamp }
@@ -413,9 +416,11 @@ pub fn augmented_text(narrative:&str, ts: Option<Timestamp>) -> String  // "{hum
 pub fn fact_text(extracted:&ExtractedFact) -> String      // what + mentioned_at prefix
 ```
 - **Composition**: `fact.text = what`; the A.1 prompt now requires `what` to be the complete narrative that weaves in when/where/who/why. The stored text is already augmented: `fact_text` is both `fact.text` and the embedding/reranker input (one string across all paths, schema §7.A#1).
+- **Validation order**: `extract_facts` calls `normalize_time` before `validate_extracted`, so validation sees the final chunk-filled times. An interval with `end < start`, or an end without a start, discards the fact (causal references to it are remapped away); a start-only interval is a valid open interval.
+- **Typed interval**: `Fact` and `NewFact` carry `occurred: OccurrenceInterval` instead of two independent options. `OccurrenceInterval::from_parts` rejects reversed and end-only bounds, so an invalid interval cannot exist in a fact; the store skips a corrupt legacy row individually (with a warning) instead of failing the whole read.
 - **No fabrication**: without a chunk interval all three times stay `None`; `occurred_end` is never synthesized from `occurred_start`.
 - **Acceptance**: never fabricate time (None stays None); stored text == embedding input (the same string); prefix format `"<weekday>, <month> <day>, <year>. "`.
-- **Tests**: fill from chunk bounds; midpoint; single-bound fallback; user-supplied times untouched; no chunk times → all None; human-readable format (weekday correctness); prefix only when a time exists; `fact_text` composition.
+- **Tests**: fill from chunk bounds; midpoint; single-bound fallback; user-supplied times untouched; no chunk times → all None; reversed and end-only intervals discarded after normalization while open intervals are kept; human-readable format (weekday correctness); prefix only when a time exists; `fact_text` composition.
 
 ## P1-9 Entity Resolution ρ
 

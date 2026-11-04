@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::types::{
   Bank, BankId, CausalRelation, Chunk, ChunkId, Entity, EntityId, EntityKind, Fact, FactId,
-  FactType, LinkId, LinkType, Source, SourceId, Timestamp,
+  FactType, LinkId, LinkType, OccurrenceInterval, Source, SourceId, Timestamp,
 };
 
 /// The persistence contract used by every pipeline.
@@ -88,6 +88,7 @@ pub trait Store: Send + Sync {
   async fn neighbors(&self, bank: BankId, from: FactId) -> Result<Vec<Neighbor>>;
 
   /// Facts whose occurrence interval intersects `range` (closed interval).
+  /// Rows with an invalid occurrence interval are excluded.
   async fn facts_in_range(
     &self,
     bank: BankId,
@@ -95,6 +96,10 @@ pub trait Store: Send + Sync {
   ) -> Result<Vec<FactId>>;
 
   /// Loads facts by id in one round trip; order is unspecified.
+  ///
+  /// A row whose occurrence interval cannot form a valid value (legacy or
+  /// externally written data) is skipped individually with a warning; the other
+  /// rows are still returned. Other corruption is fatal.
   async fn fetch_facts(&self, ids: &[FactId]) -> Result<Vec<Fact>>;
 
   /// Batch-increments `access_count`; does not touch `updated_at`.
@@ -220,10 +225,8 @@ pub struct NewFact {
   pub chunk_id: Option<ChunkId>,
   /// Embedding vector; `None` means backfill is pending.
   pub embedding: Option<Vec<f32>>,
-  /// Occurrence interval start.
-  pub occurred_start: Option<Timestamp>,
-  /// Occurrence interval end.
-  pub occurred_end: Option<Timestamp>,
+  /// Validated occurrence interval (`Closed`, `Open`, or `Unknown`).
+  pub occurred: OccurrenceInterval,
   /// Mention time.
   pub mentioned_at: Option<Timestamp>,
   /// Belief strength (required for reflect-formed opinions).
@@ -577,8 +580,7 @@ mod tests {
         text: "Emily joined Google.".into(),
         chunk_id: Some(chunk_id),
         embedding: Some(vec![0.1, 0.2]),
-        occurred_start: None,
-        occurred_end: None,
+        occurred: OccurrenceInterval::Unknown,
         mentioned_at: Some(now),
         confidence: None,
         attrs: Some(serde_json::json!({ "fact_kind": "statement" })),

@@ -2,6 +2,7 @@
 
 pub mod enums;
 pub mod id;
+pub mod interval;
 pub mod profile;
 pub mod rows;
 pub mod structured;
@@ -11,6 +12,7 @@ pub use enums::{
   CausalRelation, ChunkStatus, EntityKind, EnumParseError, FactType, LinkType, SourceStatus,
 };
 pub use id::{BankId, ChunkId, EntityId, FactId, IdParseError, LinkId, SourceId};
+pub use interval::{ClosedInterval, IntervalError, OccurrenceInterval};
 pub use profile::{BankProfile, ProfileError};
 pub use rows::{Bank, Chunk, Entity, Fact, FactEntity, FactLink, Source};
 pub use structured::{

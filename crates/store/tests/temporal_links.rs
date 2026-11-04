@@ -5,7 +5,9 @@ use std::time::Duration;
 use engine::link::{LinkConfig, build_temporal_links};
 use engine::ports::{NewLink, Store};
 use engine::testing::timestamp;
-use engine::types::{Bank, BankId, BankProfile, Fact, FactId, FactType, LinkType, to_epoch_millis};
+use engine::types::{
+  Bank, BankId, BankProfile, Fact, FactId, FactType, LinkType, OccurrenceInterval, to_epoch_millis,
+};
 use sqlx::SqlitePool;
 use store::SqliteStore;
 use store::testing::memory_pool;
@@ -45,8 +47,8 @@ fn fact(bank: BankId, start: Option<i64>, end: Option<i64>) -> Fact {
     text: "fact".into(),
     embedding: None,
     chunk_id: None,
-    occurred_start: start.map(ts),
-    occurred_end: end.map(ts),
+    occurred: OccurrenceInterval::from_parts(start.map(ts), end.map(ts))
+      .expect("test interval must be valid"),
     mentioned_at: None,
     confidence: None,
     access_count: 0,
@@ -68,8 +70,8 @@ async fn insert_existing(pool: &SqlitePool, fact: &Fact) {
   .bind(fact.id.to_string())
   .bind(fact.bank_id.to_string())
   .bind(&fact.text)
-  .bind(fact.occurred_start.map(to_epoch_millis))
-  .bind(fact.occurred_end.map(to_epoch_millis))
+  .bind(fact.occurred.start().map(to_epoch_millis))
+  .bind(fact.occurred.end().map(to_epoch_millis))
   .bind(fact.mentioned_at.map(to_epoch_millis))
   .bind(to_epoch_millis(fact.created_at))
   .bind(to_epoch_millis(fact.updated_at))

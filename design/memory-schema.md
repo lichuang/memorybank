@@ -145,6 +145,8 @@ Chunking strategy (configuration): when the caller provides session/turn metadat
 | `access_count` | `Int` default 0 | x.access_count: incremented on recall hits; observability/tuning |
 | `attrs` | `JSON` nullable | remaining x: fact_kind, structured location, and other fields the paper leaves open |
 
+Engine representation: `Fact.occurred` is an `OccurrenceInterval` (`Closed(ClosedInterval)` / `Open { start }` / `Unknown`). `from_parts` rejects `end < start` and end-only rows; reads skip a corrupt legacy row individually (with a warning) instead of failing the batch.
+
 Conditional constraints:
 
 - `fact_type=opinion` and `chunk_id IS NULL` (reflect-produced) ⇒ `confidence` NOT NULL;

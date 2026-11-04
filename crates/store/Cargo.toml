@@ -10,6 +10,7 @@ description = "SQLite storage adapter for memorybank."
 async-trait.workspace = true
 engine.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 sqlx = { version = "0.8", default-features = false, features = [
   "sqlite",
   "runtime-tokio",

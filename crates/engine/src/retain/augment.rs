@@ -16,6 +16,10 @@ use crate::types::{Chunk, ExtractedFact, Timestamp, from_epoch_millis, to_epoch_
 ///
 /// The wall clock is deliberately **not** used: a fact with no temporal context
 /// keeps `None` instead of being stamped with ingestion time.
+///
+/// The extraction pass calls this before
+/// [`crate::retain::extract::validate_extracted`]: a fact whose filled interval
+/// is reversed or end-only is discarded there, not repaired here.
 pub fn normalize_time(extracted: &mut ExtractedFact, chunk: &Chunk) {
   if extracted.occurred_start.is_none() {
     extracted.occurred_start = chunk.time_start;

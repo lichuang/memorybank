@@ -2,7 +2,9 @@
 
 use engine::ports::Store;
 use engine::testing::timestamp;
-use engine::types::{BankId, FactId, TimeRange, to_epoch_millis};
+use engine::types::{
+  BankId, ClosedInterval, FactId, OccurrenceInterval, TimeRange, to_epoch_millis,
+};
 use sqlx::SqlitePool;
 use store::SqliteStore;
 use store::testing::memory_pool;
@@ -141,8 +143,12 @@ async fn fetch_facts_round_trips_every_field() {
   assert_eq!(fact.text, "a fact");
   assert_eq!(fact.embedding.as_deref(), Some(&[1.5_f32, -2.0][..]));
   assert_eq!(fact.chunk_id, None);
-  assert_eq!(fact.occurred_start, Some(ts(hour(1))));
-  assert_eq!(fact.occurred_end, Some(ts(hour(2))));
+  assert_eq!(
+    fact.occurred,
+    OccurrenceInterval::Closed(
+      ClosedInterval::new(ts(hour(1)), ts(hour(2))).expect("ordered interval")
+    )
+  );
   assert_eq!(fact.mentioned_at, Some(ts(hour(3))));
   assert_eq!(fact.confidence, Some(0.75));
   assert_eq!(fact.access_count, 3);
@@ -197,4 +203,38 @@ async fn fetch_facts_rejects_a_corrupt_embedding_blob() {
   let error = store.fetch_facts(&[id]).await.expect_err("corrupt blob");
 
   assert!(matches!(error, engine::Error::Fatal(_)), "error: {error}");
+}
+
+#[tokio::test]
+async fn skips_rows_with_invalid_occurrence_intervals() {
+  let pool = memory_pool().await.expect("pool");
+  let store = SqliteStore::new(pool.clone());
+  let bank = BankId::new();
+
+  let valid = insert_interval(&pool, bank, Some(0), Some(hour(1))).await;
+  let reversed = insert_interval(&pool, bank, Some(hour(2)), Some(hour(1))).await;
+  let end_only = insert_interval(&pool, bank, None, Some(hour(1))).await;
+
+  let facts = store
+    .fetch_facts(&[valid, reversed, end_only])
+    .await
+    .expect("fetch");
+  assert_eq!(
+    facts.len(),
+    1,
+    "invalid rows fail individually and do not abort the read"
+  );
+  assert_eq!(facts[0].id, valid);
+
+  let ids = store
+    .facts_in_range(
+      bank,
+      TimeRange {
+        start: ts(-hour(1)),
+        end: ts(hour(3)),
+      },
+    )
+    .await
+    .expect("range");
+  assert_eq!(ids, vec![valid], "invalid rows are filtered in SQL");
 }

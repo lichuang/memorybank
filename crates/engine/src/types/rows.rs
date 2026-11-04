@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
   BankId, BankProfile, CausalRelation, ChunkId, ChunkStatus, EntityId, EntityKind, FactId,
-  FactType, LinkId, LinkType, SourceId, SourceStatus, Timestamp,
+  FactType, LinkId, LinkType, OccurrenceInterval, SourceId, SourceStatus, Timestamp,
 };
 
 /// A memory bank: the tenant container plus the agent profile.
@@ -75,7 +75,9 @@ pub struct Chunk {
 ///
 /// Invariants (schema §3.4):
 /// - `fact_type == Observation` implies `chunk_id == None`;
-/// - reflect-produced opinions have `chunk_id == None` and `confidence.is_some()`.
+/// - reflect-produced opinions have `chunk_id == None` and `confidence.is_some()`;
+/// - `occurred` is always a valid interval (`Closed` ordered, `Open`, or
+///   `Unknown`); the type system rejects reversed and end-only bounds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fact {
   /// Fact identifier.
@@ -91,10 +93,8 @@ pub struct Fact {
   /// Chunk slice this row was extracted from; `None` for observations and
   /// reflect-produced opinions.
   pub chunk_id: Option<ChunkId>,
-  /// Occurrence interval start τs.
-  pub occurred_start: Option<Timestamp>,
-  /// Occurrence interval end τe.
-  pub occurred_end: Option<Timestamp>,
+  /// Validated occurrence interval τs..τe (`Closed`, `Open`, or `Unknown`).
+  pub occurred: OccurrenceInterval,
   /// Mention time τm.
   pub mentioned_at: Option<Timestamp>,
   /// Belief strength c (required for reflect-produced opinions).
@@ -194,8 +194,7 @@ mod tests {
       text: "Emily works at Google.".into(),
       embedding: Some(vec![0.1, 0.2, 0.3]),
       chunk_id: Some(ChunkId::new()),
-      occurred_start: None,
-      occurred_end: None,
+      occurred: OccurrenceInterval::Unknown,
       mentioned_at: Some(now),
       confidence: None,
       access_count: 2,

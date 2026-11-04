@@ -6,8 +6,11 @@
 use schemars::schema_for;
 use tracing::warn;
 
+use super::augment::normalize_time;
 use crate::ports::{JsonRequest, Llm, LlmExt};
-use crate::types::{Chunk, ExtractedFact, FactExtractionResponse, FactType};
+use crate::types::{
+  Chunk, ExtractedFact, FactExtractionResponse, FactType, IntervalError, OccurrenceInterval,
+};
 use crate::{Error, Result};
 
 /// The A.1 system prompt, embedded at compile time so the binary never reads
@@ -47,11 +50,13 @@ pub struct ExtractionReport {
 
 /// Extracts facts from one chunk.
 ///
-/// The response is validated fact by fact: invalid facts are counted and
-/// dropped, and causal references are remapped to the surviving list (references
-/// to dropped facts, out-of-range indices, and self-references are removed).
-/// Transport errors (timeouts, malformed JSON, schema mismatches) propagate
-/// unchanged, so the caller can retry only [`crate::Error::Retryable`].
+/// Each proposal is first normalized against the chunk's time bounds, then
+/// validated fact by fact: invalid facts (empty text, observation rows,
+/// reversed or end-only occurrence intervals) are counted and dropped, and
+/// causal references are remapped to the surviving list (references to dropped
+/// facts, out-of-range indices, and self-references are removed). Transport
+/// errors (timeouts, malformed JSON, schema mismatches) propagate unchanged, so
+/// the caller can retry only [`crate::Error::Retryable`].
 pub async fn extract_facts(
   llm: &dyn Llm,
   chunk: &Chunk,
@@ -71,13 +76,15 @@ pub async fn extract_facts(
 
   let response: FactExtractionResponse = llm.complete_json(request).await?;
 
-  Ok(filter_facts(response.facts))
+  Ok(filter_facts(response.facts, chunk))
 }
 
 /// Returns a reason when a single extracted fact must be discarded.
 ///
-/// `fact_type` is already validated by deserialization; this checks semantic
-/// rules only. Observation rows are never extraction products (paper A.5.1).
+/// Call this **after** [`normalize_time`]: the occurrence checks (no end-only
+/// interval, no reversed bounds) apply to the final, chunk-filled times.
+/// `fact_type` is already validated by deserialization; the rest are semantic
+/// rules. An open interval (`start` only) is valid: the event is still ongoing.
 pub fn validate_extracted(fact: &ExtractedFact) -> Option<&'static str> {
   if fact.what.trim().is_empty() {
     return Some("empty `what`");
@@ -85,16 +92,26 @@ pub fn validate_extracted(fact: &ExtractedFact) -> Option<&'static str> {
   if fact.fact_type == FactType::Observation {
     return Some("observation rows are synthesized, not extracted");
   }
+  if let Err(error) = OccurrenceInterval::from_parts(fact.occurred_start, fact.occurred_end) {
+    return Some(match error {
+      IntervalError::Reversed { .. } => "`occurred_end` precedes `occurred_start`",
+      IntervalError::EndWithoutStart { .. } => "`occurred_end` without `occurred_start`",
+    });
+  }
   None
 }
 
-fn filter_facts(facts: Vec<ExtractedFact>) -> ExtractionReport {
+fn filter_facts(facts: Vec<ExtractedFact>, chunk: &Chunk) -> ExtractionReport {
   let original_len = facts.len();
   let mut old_to_new: Vec<Option<usize>> = vec![None; original_len];
   let mut kept: Vec<(usize, ExtractedFact)> = Vec::with_capacity(original_len);
   let mut discarded = 0_usize;
 
   for (original_index, mut fact) in facts.into_iter().enumerate() {
+    // Normalize first so the interval validation sees the final times (filling
+    // one side from the chunk can create a reversed interval).
+    normalize_time(&mut fact, chunk);
+
     if let Some(reason) = validate_extracted(&fact) {
       warn!(
         index = original_index,
@@ -183,6 +200,18 @@ mod tests {
     }
   }
 
+  fn chunk_with_time(text: &str, start: Option<i64>, end: Option<i64>) -> Chunk {
+    Chunk {
+      time_start: start.map(timestamp),
+      time_end: end.map(timestamp),
+      ..chunk(text)
+    }
+  }
+
+  fn at(millis: i64) -> String {
+    timestamp(millis).to_rfc3339()
+  }
+
   fn fact_json(what: &str) -> Value {
     json!({
       "what": what,
@@ -192,6 +221,17 @@ mod tests {
       "why": "it matters",
       "fact_type": "world"
     })
+  }
+
+  fn fact_json_at(what: &str, start: Option<i64>, end: Option<i64>) -> Value {
+    let mut value = fact_json(what);
+    if let Some(start) = start {
+      value["occurred_start"] = json!(at(start));
+    }
+    if let Some(end) = end {
+      value["occurred_end"] = json!(at(end));
+    }
+    value
   }
 
   #[tokio::test]
@@ -382,5 +422,104 @@ mod tests {
     .expect_err("timeout");
 
     assert!(error.is_retryable());
+  }
+
+  #[tokio::test]
+  async fn normalizes_then_discards_reversed_intervals() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({
+        "facts": [
+          // Start after the chunk end: filling the missing end creates a reversal.
+          fact_json_at("reversed", Some(25_000), None),
+          // End-only: filling the start from the chunk makes it valid.
+          fact_json_at("fixed", None, Some(15_000)),
+          // No times: both sides come from the chunk.
+          fact_json("filled")
+        ]
+      }),
+    );
+
+    let report = extract_facts(
+      &llm,
+      &chunk_with_time("text", Some(10_000), Some(20_000)),
+      &ExtractionConfig::default(),
+    )
+    .await
+    .expect("extraction");
+
+    assert_eq!(report.discarded, 1);
+    assert_eq!(report.facts.len(), 2);
+
+    assert_eq!(report.facts[0].what, "fixed");
+    assert_eq!(report.facts[0].occurred_start, Some(timestamp(10_000)));
+    assert_eq!(report.facts[0].occurred_end, Some(timestamp(15_000)));
+
+    assert_eq!(report.facts[1].what, "filled");
+    assert_eq!(report.facts[1].occurred_start, Some(timestamp(10_000)));
+    assert_eq!(report.facts[1].occurred_end, Some(timestamp(20_000)));
+  }
+
+  #[tokio::test]
+  async fn discards_end_only_intervals_without_chunk_time() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({
+        "facts": [
+          fact_json_at("end only", None, Some(15_000)),
+          fact_json_at("open", Some(5_000), None)
+        ]
+      }),
+    );
+
+    let report = extract_facts(&llm, &chunk("text"), &ExtractionConfig::default())
+      .await
+      .expect("extraction");
+
+    assert_eq!(report.discarded, 1);
+    assert_eq!(report.facts.len(), 1);
+    assert_eq!(report.facts[0].what, "open");
+    assert_eq!(report.facts[0].occurred_start, Some(timestamp(5_000)));
+    assert_eq!(
+      report.facts[0].occurred_end, None,
+      "an open interval is valid"
+    );
+  }
+
+  #[tokio::test]
+  async fn discarding_a_reversed_fact_drops_causal_references_to_it() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({
+        "facts": [
+          fact_json_at("reversed", Some(25_000), None),
+          {
+            "what": "references the bad fact", "when": "w", "where": "w", "who": "w",
+            "why": "w", "fact_type": "world",
+            "causal_relations": [
+              { "target_fact_index": 0, "relation": "causes", "strength": 1.0 }
+            ]
+          }
+        ]
+      }),
+    );
+
+    let report = extract_facts(
+      &llm,
+      &chunk_with_time("text", Some(10_000), Some(20_000)),
+      &ExtractionConfig::default(),
+    )
+    .await
+    .expect("extraction");
+
+    assert_eq!(report.discarded, 1);
+    assert_eq!(report.facts.len(), 1);
+    assert!(
+      report.facts[0].causal_relations.is_empty(),
+      "the reference to the discarded fact is dropped"
+    );
   }
 }
