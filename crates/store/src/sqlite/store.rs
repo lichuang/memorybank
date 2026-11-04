@@ -15,7 +15,7 @@ use engine::ports::{
 };
 use engine::types::{
   Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, Entity, EntityId, EntityKind, Fact,
-  FactId, Source, SourceId, TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
+  FactId, FactType, Source, SourceId, TimeRange, Timestamp, from_epoch_millis, to_epoch_millis,
 };
 use engine::{Error, Result};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
@@ -295,12 +295,55 @@ impl Store for SqliteStore {
     Err(not_implemented("neighbors"))
   }
 
-  async fn facts_in_range(&self, _bank: BankId, _range: TimeRange) -> Result<Vec<FactId>> {
-    Err(not_implemented("facts_in_range"))
+  async fn facts_in_range(&self, bank: BankId, range: TimeRange) -> Result<Vec<FactId>> {
+    // Closed operation interval; an open end (`occurred_end IS NULL`) means
+    // "still ongoing", so it intersects every range starting before its start.
+    // Rows with no start carry no usable interval.
+    let rows: Vec<String> = sqlx::query_scalar(
+      "SELECT id FROM fact \
+       WHERE bank_id = ? AND occurred_start IS NOT NULL \
+         AND occurred_start <= ? \
+         AND (occurred_end IS NULL OR occurred_end >= ?) \
+       ORDER BY occurred_start, id",
+    )
+    .bind(bank.to_string())
+    .bind(to_epoch_millis(range.end))
+    .bind(to_epoch_millis(range.start))
+    .fetch_all(&self.pool)
+    .await
+    .map_err(|error| map_read("fact", error))?;
+
+    rows
+      .into_iter()
+      .map(|id| {
+        FactId::parse(&id).map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))
+      })
+      .collect()
   }
 
-  async fn fetch_facts(&self, _ids: &[FactId]) -> Result<Vec<Fact>> {
-    Err(not_implemented("fetch_facts"))
+  async fn fetch_facts(&self, ids: &[FactId]) -> Result<Vec<Fact>> {
+    if ids.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let mut query = QueryBuilder::<Sqlite>::new(
+      "SELECT id, bank_id, fact_type, text, embedding, chunk_id, occurred_start, occurred_end, \
+              mentioned_at, confidence, access_count, attrs, created_at, updated_at \
+       FROM fact WHERE id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for id in ids {
+      separated.push_bind(id.to_string());
+    }
+    query.push(")");
+
+    let rows: Vec<FactRow> = query
+      .build_query_as()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("fact", error))?;
+
+    rows.into_iter().map(fact_from_row).collect()
   }
 
   async fn increment_access(&self, _ids: &[FactId]) -> Result<()> {
@@ -702,6 +745,102 @@ fn entity_from_row(row: EntityRow) -> Result<Entity> {
     created_at: timestamp(created_at)?,
     updated_at: timestamp(updated_at)?,
   })
+}
+
+type FactRow = (
+  String,
+  String,
+  String,
+  String,
+  Option<Vec<u8>>,
+  Option<String>,
+  Option<i64>,
+  Option<i64>,
+  Option<i64>,
+  Option<f64>,
+  i64,
+  Option<String>,
+  i64,
+  i64,
+);
+
+fn fact_from_row(row: FactRow) -> Result<Fact> {
+  let (
+    id,
+    bank_id,
+    fact_type,
+    text,
+    embedding,
+    chunk_id,
+    occurred_start,
+    occurred_end,
+    mentioned_at,
+    confidence,
+    access_count,
+    attrs,
+    created_at,
+    updated_at,
+  ) = row;
+
+  Ok(Fact {
+    id: FactId::parse(&id)
+      .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?,
+    bank_id: BankId::parse(&bank_id)
+      .map_err(|error| Error::fatal(format!("corrupt bank id `{bank_id}`: {error}")))?,
+    fact_type: fact_type
+      .parse::<FactType>()
+      .map_err(|error| Error::fatal(error.to_string()))?,
+    text,
+    embedding: decode_embedding(embedding)?,
+    chunk_id: chunk_id
+      .map(|value| {
+        ChunkId::parse(&value)
+          .map_err(|error| Error::fatal(format!("corrupt chunk id `{value}`: {error}")))
+      })
+      .transpose()?,
+    occurred_start: occurred_start.map(timestamp).transpose()?,
+    occurred_end: occurred_end.map(timestamp).transpose()?,
+    mentioned_at: mentioned_at.map(timestamp).transpose()?,
+    confidence: confidence.map(|value| value as f32),
+    access_count: u32::try_from(access_count)
+      .map_err(|_| Error::fatal(format!("corrupt access count `{access_count}`")))?,
+    attrs: attrs
+      .map(|text| {
+        serde_json::from_str(&text)
+          .map_err(|error| Error::fatal(format!("corrupt fact attrs: {error}")))
+      })
+      .transpose()?,
+    created_at: timestamp(created_at)?,
+    updated_at: timestamp(updated_at)?,
+  })
+}
+
+/// Decodes a little-endian `f32` BLOB.
+///
+/// The exact BLOB layout is adapter-owned (the logical schema only requires a
+/// fixed-size vector); the tx2 write path must use this same encoding.
+fn decode_embedding(bytes: Option<Vec<u8>>) -> Result<Option<Vec<f32>>> {
+  bytes
+    .map(|bytes| {
+      if bytes.len() % 4 != 0 {
+        return Err(Error::fatal(format!(
+          "corrupt embedding blob: {} bytes is not a multiple of 4",
+          bytes.len()
+        )));
+      }
+
+      Ok(
+        bytes
+          .chunks_exact(4)
+          .map(|chunk| {
+            let mut word = [0_u8; 4];
+            word.copy_from_slice(chunk);
+            f32::from_le_bytes(word)
+          })
+          .collect(),
+      )
+    })
+    .transpose()
 }
 
 fn timestamp(millis: i64) -> Result<Timestamp> {

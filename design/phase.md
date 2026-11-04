@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 11/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (23/66 total)**
+> Current progress: **P0 12/12 · P1 12/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (24/66 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -488,18 +488,33 @@ pub fn temporal_sim(cand:&EntityCandidate, at:Option<Timestamp>, scale:Duration)
 
 ## P1-12 Temporal Link Construction
 
-**Status**: ❌
+**Status**: ✅ (2026-11-03)
 
 - **Content**: interval proximity → two rows.
 - **Design**:
 ```rust
-pub fn temporal_weight(gap: Duration, sigma: Duration) -> f32   // exp(-gap/sigma)
+pub fn temporal_weight(gap: Duration, sigma: Duration) -> f32   // paper §4.1.4 eq. (4); σ=0 → step
 pub async fn build_temporal_links(store:&dyn Store, bank:BankId, new_facts:&[Fact],
-                                  cfg:&LinkConfig) -> Result<Vec<NewLink>>
-// candidates: interval distance < window; sort by weight and keep the top-K pairs; write from→to and to→from per pair
+                                  cfg:&LinkConfig, now:Timestamp) -> Result<Vec<NewLink>>
+pub struct LinkConfig { pub temporal_window: Duration /* 24h */,
+                        pub temporal_sigma: Duration  /* 6h */,
+                        pub temporal_top_k: usize     /* 5 */ }
 ```
-- **Acceptance**: reciprocal pairs always complete (canonical-key count is 2); pruning leaves no one-sided rows; rows without time create no edges.
-- **Tests**: three-fact time window; pruning boundaries; weight formula unit test.
+  Uses **occurrence intervals** (`occurred_start..occurred_end`), as clarified in
+  `memory-schema.md` §5.5: `gap = 0` for overlapping or touching intervals, otherwise the
+  empty span between them; both bounds are required (an open interval creates no edge).
+  Candidate windows around the new facts are merged, then `Store::facts_in_range`
+  (occurrence intersection; `occurred_end IS NULL` = open interval) and
+  `Store::fetch_facts` load the existing side; new-new pairs are matched in memory.
+  Each new fact keeps its `temporal_top_k` closest candidates, pairs are deduplicated by
+  canonical key, and each surviving pair yields `from→to` plus `to→from` with equal weight
+  and `created_at = now` (the only clock use).
+- **Acceptance**: reciprocal pairs always complete (canonical-key count is 2); pruning
+  leaves no one-sided rows; rows without a complete time interval create no edges.
+- **Tests**: weight formula (including σ=0); interval gap; three-fact time window;
+  per-fact budget; new-new dedup; incomplete intervals; inclusive window boundary;
+  cross-bank isolation; deterministic selection; `facts_in_range` intersections and
+  `fetch_facts` round-trip / corrupt-BLOB handling.
 
 ## P1-13 Semantic Link Construction
 

@@ -308,7 +308,7 @@ RRF fusion, cross-encoder reranking, and token-budget packing all happen in memo
 
 ### 5.5 Time Scales
 
-One row's data has three clocks: ingest time (source/chunk created_at), conversation clock (`mentioned_at`, chunk.time_start/end), and event clock (`occurred_*`). Recall's temporal filter uses the event clock; temporal decay edges and entity-resolution temporal proximity use the conversation clock.
+One row's data has three clocks: ingest time (source/chunk created_at), conversation clock (`mentioned_at`, chunk.time_start/end), and event clock (`occurred_*`). Recall's temporal filter and temporal edges use the event clock (occurrence intervals); entity-resolution temporal proximity uses the conversation clock.
 
 ## 6. Backend Adaptation Notes
 

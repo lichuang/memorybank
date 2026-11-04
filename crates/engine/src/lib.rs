@@ -4,6 +4,7 @@
 //! the ports (traits) that `store` and `llm` implement.
 
 pub mod error;
+pub mod link;
 pub mod ports;
 pub mod resolve;
 pub mod retain;
