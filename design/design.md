@@ -207,7 +207,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 
 - **temporal**: interval distance → `exp(−Δt/σt)`; prune per pair within the window; write two rows as a pair.
 - **semantic**: after embeddings are ready, vector kNN (SQLite: exact sqlite-vec `vec0`; ANN is an adapter option), **directed single row** (from = selecting side).
-- **causal**: extraction output `causal_relations[]` (same chunk only), normalized to "cause→effect", single row.
+- **causal**: extraction output `causal_relations[]` (same chunk only), **directed single row**; the extracted relation is kept as-is (`caused_by` means the target is the cause), weight is always 1.0.
 - Link thresholds and caps all come from configuration.
 
 ## 3. Cross-Cutting Concerns

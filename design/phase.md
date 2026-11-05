@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 13/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (25/67 total)**
+> Current progress: **P0 12/12 · P1 14/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (26/67 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -58,7 +58,7 @@ pub fn now_ts(clock:&dyn Clock) -> Timestamp
 pub enum FactType { World, Experience, Opinion, Observation }
 pub enum LinkType { Temporal, Semantic, Causal }
 pub enum ChunkStatus { Pending, Extracting, Done, Failed }
-pub enum CausalRelation { Causes, CausedBy, Enables, Prevents }   // normalization pending decision
+pub enum CausalRelation { Causes, CausedBy, Enables, Prevents }   // kept as-is; relation expresses direction
 pub enum EntityKind { Person, Organization, Location, Product, Concept, Other }
 pub enum SourceStatus { Received, Chunked }
 
@@ -550,12 +550,24 @@ pub async fn build_semantic_links(store:&dyn Store, bank:BankId, new_facts:&[Fac
 
 ## P1-14 Causal Link Construction
 
-**Status**: ❌
+**Status**: ✅ (2026-11-05)
 
 - **Content**: map extraction output.
-- **Design**: `pub fn causal_links(extracted:&[ExtractedFact], ids:&[FactId]) -> Vec<NewLink>`; `target_fact_index → ids[i]`; single row. Normalization per the decision (currently: keep as-is + relation).
-- **Acceptance**: out-of-range indices dropped; duplicate pairs deduplicated; strength does not enter weight (paper w=1.0).
-- **Tests**: one-way causality between two facts; chained causality; out-of-range.
+- **Design**:
+```rust
+pub fn causal_links(bank:BankId, extracted:&[ExtractedFact], ids:&[FactId],
+                    now:Timestamp) -> Vec<NewLink>
+```
+  `ids[i]` is the persisted id of `extracted[i]` (the extraction pass already remapped causal
+  indices after dropping invalid facts). `target_fact_index → ids[target]`; one directed row
+  per `(from, to, relation)` with `link_type=Causal`, `weight=1.0` (the model-reported
+  `strength` never enters the weight), and `created_at=now`. The extracted relation is kept
+  as-is: no endpoint swapping and no relation narrowing (`caused_by` means the target is the
+  cause). Out-of-range targets, missing source ids, and self-references are dropped.
+- **Acceptance**: out-of-range indices dropped; duplicate triples deduplicated; strength does
+  not enter weight (paper w=1.0); direction follows the extracted relation.
+- **Tests**: one-way causality; `caused_by` keeps direction; chained causality; out-of-range
+  and self references; duplicate triples vs distinct relations; missing ids / empty input.
 
 ## P1-15 Opinion Reinforcement
 

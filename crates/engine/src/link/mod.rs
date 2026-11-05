@@ -3,6 +3,7 @@
 //! Thresholds and budgets live here as runtime configuration; none of them is
 //! persisted (the schema stores only the edges that were finally kept).
 
+pub mod causal;
 pub mod semantic;
 pub mod temporal;
 
@@ -37,5 +38,6 @@ impl Default for LinkConfig {
   }
 }
 
+pub use causal::causal_links;
 pub use semantic::{build_semantic_links, cosine_similarity};
 pub use temporal::{build_temporal_links, temporal_weight};

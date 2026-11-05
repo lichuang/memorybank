@@ -124,8 +124,9 @@ pub enum ChunkStatus {
 
 /// Relation vocabulary for causal edges (paper A.5.1).
 ///
-/// Direction normalization is still an open decision (`design/design.md` §6);
-/// the four paper values are kept until it is settled.
+/// The extracted relation is kept as-is; direction is expressed by the
+/// relation itself (`CausedBy` means the target is the cause). No endpoint
+/// swapping or relation narrowing is performed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CausalRelation {
