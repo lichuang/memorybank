@@ -12,6 +12,10 @@ use sqlx::sqlite::SqlitePoolOptions;
 /// database intact; concurrent callers queue on the pool. Each call returns an
 /// isolated database, so tests never share state.
 pub async fn memory_pool() -> Result<SqlitePool> {
+  // Must precede the first connection: sqlite3_auto_extension applies to
+  // connections created after registration.
+  crate::sqlite::register_extensions()?;
+
   let pool = SqlitePoolOptions::new()
     .max_connections(1)
     .idle_timeout(None)

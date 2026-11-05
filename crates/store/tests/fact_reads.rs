@@ -6,8 +6,8 @@ use engine::types::{
   BankId, ClosedInterval, FactId, OccurrenceInterval, TimeRange, to_epoch_millis,
 };
 use sqlx::SqlitePool;
-use store::SqliteStore;
 use store::testing::memory_pool;
+use store::{EMBEDDING_DIM, SqliteStore};
 
 fn ts(millis: i64) -> engine::types::Timestamp {
   timestamp(millis)
@@ -113,15 +113,20 @@ async fn fetch_facts_round_trips_every_field() {
   let store = SqliteStore::new(pool.clone());
   let bank = BankId::new();
   let id = FactId::new();
+  let mut embedding = vec![0.0; EMBEDDING_DIM];
+  embedding[0] = 1.5;
+  embedding[1] = -2.0;
+
+  // fact and fact_vec are 1:1; write them atomically.
+  let mut tx = pool.begin().await.expect("begin insert");
 
   sqlx::query(
-    "INSERT INTO fact (id, bank_id, fact_type, text, embedding, chunk_id, occurred_start, \
-     occurred_end, mentioned_at, confidence, access_count, attrs, created_at, updated_at) \
-     VALUES (?, ?, 'world', 'a fact', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO fact (id, bank_id, fact_type, text, chunk_id, occurred_start, occurred_end, \
+     mentioned_at, confidence, access_count, attrs, created_at, updated_at) \
+     VALUES (?, ?, 'world', 'a fact', NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(id.to_string())
   .bind(bank.to_string())
-  .bind(blob(&[1.5, -2.0]))
   .bind(hour(1))
   .bind(hour(2))
   .bind(hour(3))
@@ -130,9 +135,21 @@ async fn fetch_facts_round_trips_every_field() {
   .bind(r#"{"fact_kind":"statement"}"#)
   .bind(1_000_i64)
   .bind(2_000_i64)
-  .execute(&pool)
+  .execute(&mut *tx)
   .await
   .expect("insert fact");
+
+  sqlx::query(
+    "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
+     SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+  )
+  .bind(blob(&embedding))
+  .bind(id.to_string())
+  .execute(&mut *tx)
+  .await
+  .expect("insert vector");
+
+  tx.commit().await.expect("commit insert");
 
   let facts = store.fetch_facts(&[id]).await.expect("fetch");
   assert_eq!(facts.len(), 1);
@@ -141,7 +158,7 @@ async fn fetch_facts_round_trips_every_field() {
   assert_eq!(fact.id, id);
   assert_eq!(fact.bank_id, bank);
   assert_eq!(fact.text, "a fact");
-  assert_eq!(fact.embedding.as_deref(), Some(&[1.5_f32, -2.0][..]));
+  assert_eq!(fact.embedding.as_deref(), Some(embedding.as_slice()));
   assert_eq!(fact.chunk_id, None);
   assert_eq!(
     fact.occurred,
@@ -183,26 +200,35 @@ async fn fetch_facts_skips_unknown_and_empty_requests() {
 }
 
 #[tokio::test]
-async fn fetch_facts_rejects_a_corrupt_embedding_blob() {
+async fn rejects_a_corrupt_embedding_blob_at_write_time() {
   let pool = memory_pool().await.expect("pool");
-  let store = SqliteStore::new(pool.clone());
   let bank = BankId::new();
   let id = FactId::new();
 
+  let mut tx = pool.begin().await.expect("begin");
+
   sqlx::query(
-    "INSERT INTO fact (id, bank_id, fact_type, text, embedding, created_at, updated_at) \
-     VALUES (?, ?, 'world', 'corrupt', ?, 0, 0)",
+    "INSERT INTO fact (id, bank_id, fact_type, text, created_at, updated_at) \
+     VALUES (?, ?, 'world', 'corrupt', 0, 0)",
   )
   .bind(id.to_string())
   .bind(bank.to_string())
-  .bind(vec![1_u8, 2, 3])
-  .execute(&pool)
+  .execute(&mut *tx)
   .await
   .expect("insert fact");
 
-  let error = store.fetch_facts(&[id]).await.expect_err("corrupt blob");
+  let error = sqlx::query(
+    "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
+     SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+  )
+  .bind(vec![1_u8, 2, 3])
+  .bind(id.to_string())
+  .execute(&mut *tx)
+  .await
+  .expect_err("the vector table rejects a malformed blob");
 
-  assert!(matches!(error, engine::Error::Fatal(_)), "error: {error}");
+  assert!(!error.to_string().is_empty());
+  tx.rollback().await.expect("rollback");
 }
 
 #[tokio::test]

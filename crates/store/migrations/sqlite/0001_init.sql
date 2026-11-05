@@ -11,10 +11,12 @@
 --   §3.3 chunk       — id PK, bank_id, source_id, chunk_index, text, content_hash,
 --                      status{pending,extracting,done,failed}; UNIQUE(bank_id, content_hash)
 --   §3.4 fact        — id PK, fact_type{world,experience,opinion,observation}, text,
---                      embedding BLOB (NULL = backfill pending), chunk_id NULL,
---                      occurred_*/mentioned_at, confidence NULL, access_count,
---                      attrs JSON; opinion-without-chunk requires confidence;
---                      observations have no chunk. BM25 corpus in fact_fts (§3.4 text).
+--                      chunk_id NULL, occurred_*/mentioned_at, confidence NULL,
+--                      access_count, attrs JSON; opinion-without-chunk requires
+--                      confidence; observations have no chunk. BM25 corpus in
+--                      fact_fts (§3.4 text). Embeddings live in fact_vec (1:1).
+--   §3.4b fact_vec   — companion vector table (vec0, fixed dimension); a missing
+--                      row means the embedding is pending/backfill.
 --   §3.5 entity      — id PK, UNIQUE(bank_id, canonical_name), entity_type{...},
 --                      mention_count, first_seen/last_seen, attrs JSON
 --   §3.6 fact_entity — composite PK (fact_id, entity_id), bank_id, mention_text;
@@ -69,7 +71,6 @@ CREATE TABLE fact (
   bank_id TEXT NOT NULL,
   fact_type TEXT NOT NULL CHECK (fact_type IN ('world', 'experience', 'opinion', 'observation')),
   text TEXT NOT NULL,
-  embedding BLOB,
   chunk_id TEXT,
   occurred_start INTEGER,
   occurred_end INTEGER,
@@ -147,3 +148,19 @@ CREATE INDEX idx_fact_entity_bank_entity ON fact_entity (bank_id, entity_id);
 CREATE INDEX idx_fact_entity_bank_fact ON fact_entity (bank_id, fact_id);
 CREATE INDEX idx_fact_link_bank_from ON fact_link (bank_id, from_fact_id);
 CREATE INDEX idx_fact_link_bank_to ON fact_link (bank_id, to_fact_id);
+
+-- Vector storage (1:1 with fact): only facts with an embedding have a row, so a
+-- missing row means "backfill pending". This is the only copy of the vector; the
+-- fixed dimension is part of the schema (store::EMBEDDING_DIM).
+CREATE VIRTUAL TABLE fact_vec USING vec0(
+  fact_id TEXT,
+  bank_id TEXT,
+  embedding float[1536] distance_metric=cosine
+);
+
+-- Embedding rows are written explicitly by the store (tx2/backfill). Deletion
+-- is kept in sync automatically; fact_vec.rowid mirrors fact.rowid.
+CREATE TRIGGER fact_vec_delete AFTER DELETE ON fact
+BEGIN
+  DELETE FROM fact_vec WHERE rowid = OLD.rowid;
+END;

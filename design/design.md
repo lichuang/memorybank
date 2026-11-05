@@ -1,6 +1,6 @@
 # memorybank Implementation Design (Rust)
 
-Based on `../docs/hindsight.pdf` (the paper) and `memory-schema.md` (the finalized logical schema: 7 tables + §1.3 admission criteria).
+Based on `../docs/hindsight.pdf` (the paper) and `memory-schema.md` (the finalized logical schema: 8 tables + §1.3 admission criteria).
 
 ## 0. Engineering Shape
 
@@ -141,7 +141,7 @@ Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 1. **`commit_chunk` is the only transaction entry**: atomicity is guaranteed by the trait method; transaction objects never leak, so engine does not need to understand each backend's transaction API.
 2. **IDs and time are engine-supplied** (`AGENTS.md`): the store never generates business IDs and never reads the wall clock; every creation DTO carries `id` and `created_at`, and methods that need "now" take it as a parameter.
 3. **`neighbors()` merges multiple sources inside the adapter**: `fact_link` rows + entity adjacency derived from `fact_entity` (the closure is never materialized) — criterion 3, "single source of truth". The result reports four kinds (`NeighborKind` includes `Entity`) because P2-3 applies a distinct µ per kind.
-4. **Work lists are always derived**: `pending_work` returns sources awaiting chunking, chunks pending/stale-claim, NULL embeddings, and entities whose evidence changed (`entity.last_seen > latest observation row's created_at`). There is no task-queue table — criterion 2, "strategies live at runtime".
+4. **Work lists are always derived**: `pending_work` returns sources awaiting chunking, chunks pending/stale-claim, facts without a `fact_vec` row, and entities whose evidence changed (`entity.last_seen > latest observation row's created_at`). There is no task-queue table — criterion 2, "strategies live at runtime".
 5. **No model/threshold fields**: embedding model, chunking parameters, σt/θs/top-k, µ(ℓ) all live in configuration — criterion 2. Embedding backfill therefore goes through `update_embeddings`: the engine owns the `Embedder`, the store only persists vectors.
 6. **`search_vector` must always be available**: ANN is adapter-internal optimization (SQLite brute-force cosine; pgvector indexing can be added later on PG); the contract only requires "return top-k".
 
@@ -206,7 +206,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 ### 2.6 link (Link Construction)
 
 - **temporal**: interval distance → `exp(−Δt/σt)`; prune per pair within the window; write two rows as a pair.
-- **semantic**: after embeddings are ready, ANN top-k (budget predicate), **directed single row** (from = selecting side).
+- **semantic**: after embeddings are ready, vector kNN (SQLite: exact sqlite-vec `vec0`; ANN is an adapter option), **directed single row** (from = selecting side).
 - **causal**: extraction output `causal_relations[]` (same chunk only), normalized to "cause→effect", single row.
 - Link thresholds and caps all come from configuration.
 

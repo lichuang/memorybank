@@ -16,7 +16,7 @@ Design docs (read in this order):
 |---|---|
 | `design/phase.md` | **What to do**: 67 implementation tasks (P0–P5) with content / design / acceptance / tests and status markers |
 | `design/design.md` | **How to build it**: workspace layout, port contracts, pipeline implementation, testing strategy |
-| `design/memory-schema.md` | **What the data looks like**: 7 tables, admission criteria (§1.3), data flow, retired constructs (§7.C) |
+| `design/memory-schema.md` | **What the data looks like**: 8 tables, admission criteria (§1.3), data flow, retired constructs (§7.C) |
 | `docs/hindsight.pdf` | The paper — the final authority for design trade-offs |
 
 ## 2. Repository layout (target)
@@ -76,6 +76,7 @@ cargo doc --workspace --no-deps
 - Rust edition 2024 (pinned to 1.91.0 by `rust-toolchain.toml`); formatting follows `rustfmt.toml` (2-space indent, reordered imports); clippy clean.
 - **Errors**: `thiserror`; library code uses `engine::Error` (Retryable / Fatal / Config / NotFound / Conflict). No `anyhow` in library code; `anyhow` is fine in tests.
 - **Async**: tokio + `async-trait`; ports must be object-safe (`Box<dyn Store>` must compile); no blocking calls inside async contexts. Heavy CPU work (brute-force vector search, chunking) may use `spawn_blocking`.
+- **Unsafe**: the workspace denies `unsafe_code`; the only exception is `store::sqlite::register_extensions` (sqlite-vec FFI), which must keep its `SAFETY` comment.
 - **IDs**: UUIDv7, allocated in `engine` **before** the transaction; `Store` never generates business IDs.
 - **Time**: UTC only; inject the `Clock` port; never call `Utc::now()` directly.
 - **Config**: serde structs injected by the facade; `engine` reads no environment variables; thresholds / models / chunking parameters are never persisted.

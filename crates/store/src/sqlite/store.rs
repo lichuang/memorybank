@@ -5,12 +5,10 @@
 //! [`Error::Fatal`] instead of panicking, so an accidental call is visible as an
 //! error rather than a crash.
 
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use engine::link::cosine_similarity;
 use engine::ports::{
   ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NewChunk, NewEntity,
   NewObservation, NewOpinion, Store, WorkLists,
@@ -21,10 +19,10 @@ use engine::types::{
   to_epoch_millis,
 };
 use engine::{Error, Result};
-use futures_util::TryStreamExt;
 use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
 use tracing::warn;
 
+use super::EMBEDDING_DIM;
 use super::error::{map_read, map_write};
 use super::time::duration_millis;
 
@@ -36,6 +34,10 @@ pub struct SqliteStore {
 
 impl SqliteStore {
   /// Wraps an already-migrated pool.
+  ///
+  /// Call [`crate::sqlite::register_extensions`] **before** opening the pool:
+  /// sqlite-vec is loaded through `sqlite3_auto_extension`, which only applies
+  /// to connections created after registration.
   pub fn new(pool: SqlitePool) -> Self {
     Self { pool }
   }
@@ -287,58 +289,47 @@ impl Store for SqliteStore {
     if k == 0 {
       return Ok(Vec::new());
     }
-
-    // Brute-force scan, streamed row by row: only the current row's BLOB and a
-    // bounded top-k heap live in memory (SQLite has no ANN index).
-    let mut rows = sqlx::query_as::<_, (String, Vec<u8>)>(
-      "SELECT id, embedding FROM fact WHERE bank_id = ? AND embedding IS NOT NULL",
-    )
-    .bind(bank.to_string())
-    .fetch(&self.pool);
-
-    let mut heap: BinaryHeap<Scored> = BinaryHeap::with_capacity(k);
-
-    while let Some((id, blob)) = rows
-      .try_next()
-      .await
-      .map_err(|error| map_read("fact", error))?
-    {
-      let id = FactId::parse(&id)
-        .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
-
-      if !blob.len().is_multiple_of(4) {
-        return Err(Error::fatal(format!(
-          "corrupt embedding blob for fact {id}: {} bytes is not a multiple of 4",
-          blob.len()
-        )));
-      }
-      let dimensions = blob.len() / 4;
-      if dimensions != query.len() {
-        return Err(Error::config(format!(
-          "embedding dimension mismatch: query has {} dimensions, fact {id} has {dimensions}",
-          query.len()
-        )));
-      }
-
-      let vector = decode_embedding_bytes(&blob)?;
-      let score = cosine_similarity(query, &vector);
-      keep_best(&mut heap, Scored { id, score }, k);
+    if query.len() != EMBEDDING_DIM {
+      return Err(Error::config(format!(
+        "embedding dimension mismatch: query has {} dimensions, the schema fixes {EMBEDDING_DIM}",
+        query.len()
+      )));
     }
 
-    let mut results: Vec<Scored> = heap.into_vec();
+    // `+1` improves tie handling at the boundary: vec0 may return equal
+    // distances in any order, so over-fetch one row, sort by (score, id), then
+    // truncate.
+    let fetch_k = k.saturating_add(1);
+
+    let rows: Vec<(String, f64)> = sqlx::query_as(
+      "SELECT f.id, v.distance FROM fact_vec v JOIN fact f ON f.rowid = v.rowid \
+       WHERE v.embedding MATCH ? AND k = ? AND v.bank_id = ?",
+    )
+    .bind(encode_embedding(query))
+    .bind(i64::try_from(fetch_k).unwrap_or(i64::MAX))
+    .bind(bank.to_string())
+    .fetch_all(&self.pool)
+    .await
+    .map_err(|error| map_read("vector index", error))?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    for (id, distance) in rows {
+      let id = FactId::parse(&id)
+        .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
+      // vec0's cosine distance is `1 - cosine`; convert back to similarity.
+      let score = (1.0 - distance) as f32;
+      results.push((id, score.clamp(-1.0, 1.0)));
+    }
+
     results.sort_by(|left, right| {
       right
-        .score
-        .total_cmp(&left.score)
-        .then_with(|| left.id.cmp(&right.id))
+        .1
+        .total_cmp(&left.1)
+        .then_with(|| left.0.cmp(&right.0))
     });
+    results.truncate(k);
 
-    Ok(
-      results
-        .into_iter()
-        .map(|scored| (scored.id, scored.score))
-        .collect(),
-    )
+    Ok(results)
   }
 
   async fn search_bm25(
@@ -387,9 +378,10 @@ impl Store for SqliteStore {
     }
 
     let mut query = QueryBuilder::<Sqlite>::new(
-      "SELECT id, bank_id, fact_type, text, embedding, chunk_id, occurred_start, occurred_end, \
-              mentioned_at, confidence, access_count, attrs, created_at, updated_at \
-       FROM fact WHERE id IN (",
+      "SELECT f.id, f.bank_id, f.fact_type, f.text, v.embedding, f.chunk_id, f.occurred_start, \
+              f.occurred_end, f.mentioned_at, f.confidence, f.access_count, f.attrs, \
+              f.created_at, f.updated_at \
+       FROM fact f LEFT JOIN fact_vec v ON v.rowid = f.rowid WHERE f.id IN (",
     );
     let mut separated = query.separated(", ");
     for id in ids {
@@ -931,52 +923,12 @@ fn decode_embedding_bytes(bytes: &[u8]) -> Result<Vec<f32>> {
   )
 }
 
-/// A scored candidate inside the bounded top-k heap.
-///
-/// `Ord` is intentionally reversed: the heap root is the **worst** kept
-/// candidate (lowest score; on equal scores, the largest id), so a better
-/// candidate can evict it and the final order stays `(score desc, id asc)`.
-#[derive(Debug, Clone, Copy)]
-struct Scored {
-  id: FactId,
-  score: f32,
-}
-
-impl PartialEq for Scored {
-  fn eq(&self, other: &Self) -> bool {
-    self.id == other.id && self.score.total_cmp(&other.score) == Ordering::Equal
-  }
-}
-
-impl Eq for Scored {}
-
-impl PartialOrd for Scored {
-  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-    Some(self.cmp(other))
-  }
-}
-
-impl Ord for Scored {
-  fn cmp(&self, other: &Self) -> Ordering {
-    other
-      .score
-      .total_cmp(&self.score)
-      .then_with(|| self.id.cmp(&other.id))
-  }
-}
-
-fn keep_best(heap: &mut BinaryHeap<Scored>, candidate: Scored, k: usize) {
-  if heap.len() < k {
-    heap.push(candidate);
-    return;
-  }
-
-  if let Some(worst) = heap.peek()
-    && candidate.cmp(worst) == Ordering::Less
-  {
-    heap.pop();
-    heap.push(candidate);
-  }
+/// Encodes a vector in sqlite-vec's compact float32 layout (little-endian).
+fn encode_embedding(values: &[f32]) -> Vec<u8> {
+  values
+    .iter()
+    .flat_map(|value| value.to_le_bytes())
+    .collect()
 }
 
 fn timestamp(millis: i64) -> Result<Timestamp> {

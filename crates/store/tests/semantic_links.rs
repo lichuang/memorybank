@@ -7,8 +7,8 @@ use engine::types::{
   Bank, BankId, BankProfile, Fact, FactId, FactType, LinkType, OccurrenceInterval,
 };
 use sqlx::SqlitePool;
-use store::SqliteStore;
 use store::testing::memory_pool;
+use store::{EMBEDDING_DIM, SqliteStore};
 
 fn ts(millis: i64) -> engine::types::Timestamp {
   timestamp(millis)
@@ -58,18 +58,44 @@ fn blob(values: &[f32]) -> Vec<u8> {
     .collect()
 }
 
+/// Builds a sparse `EMBEDDING_DIM`-dimensional test vector.
+fn vector(components: &[(usize, f32)]) -> Vec<f32> {
+  let mut values = vec![0.0; EMBEDDING_DIM];
+  for (index, value) in components {
+    values[*index] = *value;
+  }
+  values
+}
+
 async fn insert_existing(pool: &SqlitePool, fact: &Fact) {
+  // fact and fact_vec are 1:1; the production write path commits them in one
+  // transaction (tx2), so the fixture does the same.
+  let mut tx = pool.begin().await.expect("begin insert");
+
   sqlx::query(
-    "INSERT INTO fact (id, bank_id, fact_type, text, embedding, created_at, updated_at) \
-     VALUES (?, ?, 'world', ?, ?, 0, 0)",
+    "INSERT INTO fact (id, bank_id, fact_type, text, created_at, updated_at) \
+     VALUES (?, ?, 'world', ?, 0, 0)",
   )
   .bind(fact.id.to_string())
   .bind(fact.bank_id.to_string())
   .bind(&fact.text)
-  .bind(fact.embedding.as_deref().map(blob))
-  .execute(pool)
+  .execute(&mut *tx)
   .await
   .expect("insert fact");
+
+  if let Some(embedding) = fact.embedding.as_deref() {
+    sqlx::query(
+      "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
+       SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+    )
+    .bind(blob(embedding))
+    .bind(fact.id.to_string())
+    .execute(&mut *tx)
+    .await
+    .expect("insert vector");
+  }
+
+  tx.commit().await.expect("commit insert");
 }
 
 fn config(top_k: usize, threshold: f32) -> LinkConfig {
@@ -89,11 +115,11 @@ fn pairs(links: &[NewLink]) -> Vec<(FactId, FactId)> {
 #[tokio::test]
 async fn links_to_similar_existing_facts_as_directed_rows() {
   let (store, bank) = setup().await;
-  let similar = fact(bank, Some(vec![1.0, 0.0]));
-  let orthogonal = fact(bank, Some(vec![0.0, 1.0]));
+  let similar = fact(bank, Some(vector(&[(0, 1.0)])));
+  let orthogonal = fact(bank, Some(vector(&[(1, 1.0)])));
   insert_existing(store.pool(), &similar).await;
   insert_existing(store.pool(), &orthogonal).await;
-  let new = fact(bank, Some(vec![1.0, 0.0]));
+  let new = fact(bank, Some(vector(&[(0, 1.0)])));
 
   let links = build_semantic_links(
     &store,
@@ -121,9 +147,9 @@ async fn links_to_similar_existing_facts_as_directed_rows() {
 #[tokio::test]
 async fn threshold_filters_weak_candidates() {
   let (store, bank) = setup().await;
-  let diagonal = fact(bank, Some(vec![1.0, 1.0]));
+  let diagonal = fact(bank, Some(vector(&[(0, 1.0), (1, 1.0)])));
   insert_existing(store.pool(), &diagonal).await;
-  let new = fact(bank, Some(vec![1.0, 0.0]));
+  let new = fact(bank, Some(vector(&[(0, 1.0)])));
 
   let strict = build_semantic_links(
     &store,
@@ -152,13 +178,13 @@ async fn threshold_filters_weak_candidates() {
 #[tokio::test]
 async fn budget_keeps_the_most_similar_candidates() {
   let (store, bank) = setup().await;
-  let closest = fact(bank, Some(vec![1.0, 0.1]));
-  let second = fact(bank, Some(vec![1.0, 0.2]));
-  let third = fact(bank, Some(vec![1.0, 0.3]));
+  let closest = fact(bank, Some(vector(&[(0, 1.0), (1, 0.1)])));
+  let second = fact(bank, Some(vector(&[(0, 1.0), (1, 0.2)])));
+  let third = fact(bank, Some(vector(&[(0, 1.0), (1, 0.3)])));
   for existing in [&closest, &second, &third] {
     insert_existing(store.pool(), existing).await;
   }
-  let new = fact(bank, Some(vec![1.0, 0.0]));
+  let new = fact(bank, Some(vector(&[(0, 1.0)])));
 
   let links = build_semantic_links(
     &store,
@@ -178,8 +204,8 @@ async fn budget_keeps_the_most_similar_candidates() {
 #[tokio::test]
 async fn new_new_pairs_are_linked_directionally() {
   let (store, bank) = setup().await;
-  let a = fact(bank, Some(vec![1.0, 0.0]));
-  let b = fact(bank, Some(vec![1.0, 0.0]));
+  let a = fact(bank, Some(vector(&[(0, 1.0)])));
+  let b = fact(bank, Some(vector(&[(0, 1.0)])));
 
   let links = build_semantic_links(
     &store,
@@ -203,7 +229,7 @@ async fn new_new_pairs_are_linked_directionally() {
 #[tokio::test]
 async fn a_fact_never_links_to_itself() {
   let (store, bank) = setup().await;
-  let new = fact(bank, Some(vec![1.0, 0.0]));
+  let new = fact(bank, Some(vector(&[(0, 1.0)])));
   // Simulate a re-run where the fact is already committed.
   insert_existing(store.pool(), &new).await;
 
@@ -223,7 +249,7 @@ async fn a_fact_never_links_to_itself() {
 #[tokio::test]
 async fn facts_without_embeddings_create_no_edges() {
   let (store, bank) = setup().await;
-  let existing = fact(bank, Some(vec![1.0, 0.0]));
+  let existing = fact(bank, Some(vector(&[(0, 1.0)])));
   insert_existing(store.pool(), &existing).await;
   let new = fact(bank, None);
 
@@ -243,7 +269,7 @@ async fn facts_without_embeddings_create_no_edges() {
 #[tokio::test]
 async fn dimension_mismatch_is_a_config_error() {
   let (store, bank) = setup().await;
-  let existing = fact(bank, Some(vec![1.0, 0.0]));
+  let existing = fact(bank, Some(vector(&[(0, 1.0)])));
   insert_existing(store.pool(), &existing).await;
   let new = fact(bank, Some(vec![1.0, 0.0, 0.0]));
 
@@ -263,7 +289,7 @@ async fn dimension_mismatch_is_a_config_error() {
 #[tokio::test]
 async fn rejects_an_out_of_range_threshold_and_allows_disabling() {
   let (store, bank) = setup().await;
-  let new = fact(bank, Some(vec![1.0, 0.0]));
+  let new = fact(bank, Some(vector(&[(0, 1.0)])));
 
   let error = build_semantic_links(
     &store,
@@ -291,9 +317,9 @@ async fn rejects_an_out_of_range_threshold_and_allows_disabling() {
 #[tokio::test]
 async fn selection_is_deterministic() {
   let (store, bank) = setup().await;
-  let existing = fact(bank, Some(vec![1.0, 0.0]));
+  let existing = fact(bank, Some(vector(&[(0, 1.0)])));
   insert_existing(store.pool(), &existing).await;
-  let new = fact(bank, Some(vec![1.0, 0.0]));
+  let new = fact(bank, Some(vector(&[(0, 1.0)])));
 
   let first = build_semantic_links(
     &store,

@@ -5,11 +5,11 @@ Based on `docs/hindsight.pdf` (the HINDSIGHT technical report). The goal is to i
 ## 0. Overall Design Decisions
 
 1. **All four networks live in one `fact` table.** In the paper, the memory graph G=(V,E) has V = "all memory units across the four networks" — opinion and observation are graph nodes too (they carry embeddings, participate in link construction and recall; opinion reinforcement computes sim(v_o, v_f)). Splitting by network would duplicate link-building and recall logic. A `fact_type` column distinguishes them, with conditional constraints for network-specific fields.
-2. **Embeddings are inline on the `fact` row** (a single `embedding` column; no separate `memory_embedding` table). Principle: **contracts carry data, not indexes** — BM25/GIN/interval indexes never entered the data contract, and neither do vectors. Every fact always has an embedding (nullable = pending generation/backfill); backend differences concern only **acceleration** (native ANN index / in-row BLOB with brute-force cosine / adapter-internal side table or external vector store), all of which are adapter implementation freedom invisible to the core. Each bank assumes a **single embedding generation**: the active model is runtime configuration, not schema. Switching models is a generation cutover: null out all vectors, then backfill with the new model (see the linkage rule in §3.4).
+2. **Embeddings are stored once, in the 1:1 `fact_vec` companion table** (a missing row = pending generation/backfill). The paper's memory unit still maps to one `fact` row; the vector is separately addressed because the vector store (sqlite-vec `vec0`, pgvector) is a table-like structure and storing it inline as well would duplicate every vector. The `Store` contract still exposes `Fact.embedding`, populated by joining the companion table. Each bank assumes a **single embedding generation**: the active model is runtime configuration, not schema. Switching models is a generation cutover: delete all `fact_vec` rows, then backfill with the new model (see the linkage rule in §3.4).
 3. **Temporal fields follow the paper's bi-temporal semantics**: τs/τe (occurrence interval, nullable) and τm (mention time) are stored separately.
 4. **`fact_link` materializes only edges that require precomputation or LLM judgment; adjacency derivable from other structures is not stored as edges.** Entity adjacency is the pairwise closure of `fact_entity` bindings — pure materialization, O(n²) for high-degree entities, and every mutation path (re-extraction / entity merge / forgetting) would need to sync it — so traversal derives it from bindings at query time. In-table: `temporal` is undirected and stored as two rows (symmetric predicate: interval proximity; reciprocal rows are written in pairs and pruned in pairs; the canonical-key group count is always 2 — a database-level invariant); `semantic`/`causal` are directed single rows — semantic direction comes from each fact's own top-k neighbor budget (similarity is symmetric, selection is not), while causal follows the causal direction. Direction semantics are derived from `link_type`; there is no direction column.
 5. **Traceability is a first-class requirement** (the paper repeatedly emphasizes traceability/audit): the chain is `source (canonical full text + metadata) → chunk (lossless slices) → fact (interpretation layer)`. Observation regeneration is **append-only** (a new batch takes effect on insert; one observation may belong to multiple entities; there is no single-owner notion or replacement set; old batches are reclaimed by runtime GC, and recall prefers recency). Opinion evolution auditing is out of scope for this schema (see §7.C).
-6. **Background scheduling is not persisted** (paper §4.1.5 Backend Processing is an async *intent*): work lists for observation synthesis, embedding backfill, and link rebuild are all derived from in-database state — NULL-embedding scans, entity evidence-change comparison (e.g. entity e's latest evidence row has a `created_at` later than its latest observation row → needs regeneration), and in-place semantic-link rebuild during a generation cutover. The scheduler is a runtime component (in-memory queue / periodic sweep); schedules lost on process crash converge via sweep. Chunk extraction retries work the same way (the chunk row persists `status` only).
+6. **Background scheduling is not persisted** (paper §4.1.5 Backend Processing is an async *intent*): work lists for observation synthesis, embedding backfill, and link rebuild are all derived from in-database state — facts without a `fact_vec` row, entity evidence-change comparison (e.g. entity e's latest evidence row has a `created_at` later than its latest observation row → needs regeneration), and in-place semantic-link rebuild during a generation cutover. The scheduler is a runtime component (in-memory queue / periodic sweep); schedules lost on process crash converge via sweep. Chunk extraction retries work the same way (the chunk row persists `status` only).
 7. **The retrieval unit is the fact row.** The four recall channels operate on `fact`'s four representations (text/BM25, vector, graph, time). Chunk text does not enter the retrieval surface by default (whether BM25 should extend to `chunk.text` — see §7).
 8. **Receive-then-persist (transactional inbox)**: before any processing starts, the source row persists the canonical full text (`payload_text`). From then on, crash recovery for chunking and extraction starts from in-database state and **does not depend on the caller resending**. Note: this is **not a kernel WAL** — there is no append-only log and no incremental replay; recovery = rescanning persisted state + idempotent re-execution (§5.1). Text purge / privacy posture is out of schema scope (§7.C).
 9. **Three levels of idempotency**: receive level = payload already persisted (no hash needed); chunk level = `chunk.content_hash` unique index, conflict means skip (material shared across sources belongs to the first arrival; a later source becomes a zero-chunk ledger row); extract level = single-chunk transaction + in-transaction `status` flip, with failures retried by rescan. The `fact` layer **never carries hashes** (LLM-rewritten text is non-deterministic and cannot serve as a dedup key).
@@ -52,7 +52,7 @@ Writing discipline: rows and the table are collectively called `fact` / fact row
 Any new table, field, edge, or cache must pass these checks:
 
 1. **Scope discipline**: paper mechanisms (§7.A) first; operational necessities (§7.B) in a minimal form; product postures and optimizations (§7.C) deferred — out-of-scope items do not enter the schema and are recorded in §7.C.
-2. **Contracts carry data, not indexes or strategies.** Test: does the value vary with **deployment/implementation** rather than with **business facts**? Yes → configuration (runtime/adapter); no → column. Example: embedding model, chunking parameters, retry pacing, link thresholds, ANN acceleration mode all live at runtime; `fact.embedding` data itself lives in the table.
+2. **Contracts carry data, not indexes or strategies.** Test: does the value vary with **deployment/implementation** rather than with **business facts**? Yes → configuration (runtime/adapter); no → column. Example: embedding model, chunking parameters, retry pacing, link thresholds, ANN acceleration mode all live at runtime; `fact_vec.embedding` data itself lives in the companion table.
 3. **Single source of truth.** Test: can it be derived from other tables/columns with **one indexed query**? Yes → do not store it. Example: entity adjacency = the pairwise closure of `fact_entity` (virtualized, not stored in `fact_link`); mention variants = `mention_text` (no alias cache table).
 4. **Admission for materialization/derived redundancy**: it must buy at least one of — (a) an index or unique constraint (e.g. `bank_id` as deletion/partition key, `chunk.content_hash`); (b) significant hot-path cost savings **with a named consumer** (e.g. `entity.mention_count` for retrieval salience or observation staleness); (c) a cross-backend capability. If it buys none → delete it. Reverse test: does deleting it only mean "slightly slower / one extra step"? Yes → delete it.
 5. **Explicit tenant and deletion keys**: every table carries `bank_id`; deletion, partitioning, and isolation must not rely on FK cascades or joins — FK semantics are not guaranteed across backends.
@@ -68,7 +68,7 @@ The specific decisions in §0 are **instances** of these criteria; retired const
 | `TS` | UTC timestamp, millisecond precision | `timestamptz` | `INTEGER` (epoch ms) / `TEXT` |
 | `Enum{a,b,c}` | lowercase string enum | `TEXT` + CHECK | `TEXT` / `INTEGER` |
 | `JSON` | arbitrary object | `jsonb` | `TEXT` / `BLOB` |
-| `Vector<d>` | fixed-size f32 vector, d = configured embedding dimension (`fact.embedding` inline column) | `vector(d)` + optional HNSW | in-row `BLOB` (brute-force cosine) / sqlite-vec / adapter-side store |
+| `Vector<d>` | fixed-size f32 vector, one row per embedded fact (`fact_vec.embedding`; d = 1536 in SQLite) | separate `fact_vec` table with `vector(d)` + optional HNSW | `fact_vec` vec0 (exact cosine; d fixed in DDL) / adapter-side store |
 | `Float01` | float in [0,1] | `real` + CHECK | `REAL` |
 
 Foreign keys are annotated `→ table.column`. Every table carries `created_at`/`updated_at` (not repeated below; listed explicitly only where the column's semantics need emphasis).
@@ -136,7 +136,6 @@ Chunking strategy (configuration): when the caller provides session/turn metadat
 | `bank_id` | `Id` → bank.id | b, required; deletion/partition key (§0.10) |
 | `fact_type` | `Enum{world, experience, opinion, observation}` | ℓ(f), owning network |
 | `text` | `Text` | t, narrative fact text (LLM rewrite). Primary BM25/full-text corpus, content fed to the LLM, reranker input |
-| `embedding` | `Vector<d>` nullable | v. NULL = pending generation/backfill: tx2 writes it when available; on failure it is set NULL and backfilled by runtime embedding backfill (`WHERE embedding IS NULL`). The semantic channel skips NULL rows (BM25 still matches — see the lexical-first window in §5.4); **never compare embeddings across models** |
 | `chunk_id` | `Id` nullable → chunk.id | provenance: the chunk slice this row was extracted from (always set for retain-produced rows). Verbatim source text lives in chunk/payload and is not duplicated here |
 | `occurred_start` | `TS` nullable | τs, occurrence interval start |
 | `occurred_end` | `TS` nullable | τe, occurrence interval end (= start for point events; NULL = open interval; both NULL = no temporal information) |
@@ -155,7 +154,23 @@ Conditional constraints:
 
 > Note: an earlier design stored a `context` column on `fact` with per-row verbatim excerpts; this was rejected because "one chunk yields multiple facts, duplicating the source text per row". Verbatim text now lives uniformly in source/chunk (payload + slices), with `chunk_id` as the replacement.
 >
-> Embedding linkage rules: if `text` is rewritten (opinion revise, re-extraction replacement) ⇒ that row's embedding becomes invalid and must be re-embedded (in-transaction or runtime backfill). Dimension d and the active embedding model are bank runtime configuration, **neither is a column** — switching models = generation cutover: NULL out all `embedding`, backfill with the new model (`WHERE embedding IS NULL`); rows from the old generation outside backfill/new writes do not participate in the semantic channel; **never compare across models**. After a cutover the semantic channel only covers "newly written + already backfilled" rows (partially available; a missing RRF list contributes 0, correctness intact). Semantic links are rebuilt in place during the cutover (also a runtime concern). Vector byte length is validated against d on write; mismatch is rejected.
+> Embedding linkage rules: the vector v lives in the companion [`fact_vec`](#34b-fact_vec--fact--vector-11) table — one row per embedded fact, a missing row means generation/backfill is pending. If `text` is rewritten (opinion revise, re-extraction replacement) ⇒ delete and reinsert that row. Dimension d and the active embedding model are runtime configuration, **neither is a logical column** — switching models = generation cutover: delete all `fact_vec` rows, backfill with the new model (facts without a `fact_vec` row); rows from the old generation outside backfill/new writes do not participate in the semantic channel; **never compare across models**. After a cutover the semantic channel only covers "newly written + already backfilled" rows (partially available; a missing RRF list contributes 0, correctness intact). Semantic links are rebuilt in place during the cutover (also a runtime concern). Vector byte length is validated against d on write; mismatch is rejected. The SQLite adapter fixes d in `fact_vec`'s DDL (1536, see §6), so moving to a model with a different dimension requires rebuilding that table.
+
+### 3.4b `fact_vec` — Fact ↔ Vector (1:1)
+
+**Purpose**: the **only** storage of fact embeddings. One row per fact that has an embedding; a missing row means generation/backfill is pending (BM25 still matches — see the lexical-first window in §5.4). `fact.id` remains the identity; the table's rowid mirrors `fact.rowid` so the 1:1 link and deletes are cheap.
+
+| Field | Type | Notes |
+|---|---|---|
+| `fact_id` | `Id` → `fact.id` | association key; unique per embedded fact (enforced by the write path — vec0 metadata cannot carry UNIQUE) |
+| `bank_id` | `Id` → `bank.id` | tenant/deletion/partition key; lets KNN filter by bank without joining `fact` |
+| `embedding` | `Vector<d>` | v; fixed d (1536 in SQLite), cosine distance; **never compare across models** |
+
+- **Write path**: tx2 inserts the row when the embedding is available; if generation fails, no row is written and the fact still commits, to be backfilled later.
+- **Replacement**: rewriting `text` deletes and reinserts the row (same transaction).
+- **Cutover**: delete all rows, then backfill with the new model; changing d requires rebuilding the table because the dimension is part of the vector type.
+- **Deletion**: follows the fact row (SQLite trigger; other adapters delete in the same transaction).
+- **Read paths**: `fetch_facts` LEFT JOINs it (missing ⇒ `Fact.embedding = None`); `search_vector` queries it directly.
 
 ### 3.5 `entity` — Canonical Entity
 
@@ -221,8 +236,10 @@ erDiagram
     bank ||--o{ chunk : "bank_id"
     bank ||--o{ fact_entity : "bank_id"
     bank ||--o{ fact_link : "bank_id"
+    bank ||--o{ fact_vec : "bank_id"
     source ||--o{ chunk : "source_id"
     chunk ||--o{ fact : "chunk_id"
+    fact ||--o| fact_vec : "fact_id"
     fact ||--o{ fact_entity : "fact_id"
     entity ||--o{ fact_entity : "entity_id"
     fact }o--o{ fact : "fact_link (self M:N)"
@@ -232,6 +249,7 @@ Key points:
 
 - **bank is the tenant boundary for all data, and every table carries `bank_id` directly (§0.10)**: "delete a bank" = indexed range deletes per table (parallelizable), not relying on FK cascades; cross-table references (both ends of fact_link, both ends of fact_entity) are validated for same-bank on write. Global convention: `bank_id` is indexed on every table (except bank itself).
 - **Three-layer provenance chain**: source (ledger: metadata + canonical full text) → chunk (lossless slice material) → fact (generated interpretation layer). The verbatim text exists twice in the database (payload + slices, ×2), required by the inbox and idempotent replay; fact does not duplicate source text, and `chunk_id` is the only anchor. When a cross-source chunk hash matches, **no duplicate material row is created** — material and derived facts always have a single owner.
+- **fact ↔ vector is 1:1** (`fact_vec`): one row per embedded fact; a missing row means the embedding is pending/backfill, so the semantic channel simply skips it. The rowid mirrors `fact.rowid` and follows fact deletion.
 - **fact ↔ entity is N:M** (`fact_entity`; many rows per fact on the memory side). Observation rows use the same binding scheme; generation-target and mentioned entities are not distinguished (the subject notion is process information and is not persisted); regeneration is append-only and old batches are reclaimed by runtime GC (§5.3).
 - **fact ↔ fact self-reference** has only one group: `fact_link` (graph edges, M:N). Observation regeneration is **append-only** (a new batch takes effect on insert; no version chain; old batches are reclaimed by runtime GC).
 - **No opinion-history table**: opinions evolve in place (confidence updates); there is no audit table in this schema (§7.C).
@@ -250,7 +268,7 @@ Key points:
 ③ per-chunk extraction (worker-driven; model calls outside the transaction):
    claim: pending→extracting (atomic; updated_at is the claim token)
    LLM extraction / Assess / embedding, etc.
-   tx2: all fact products of the chunk (fact (embedding written inline) + fact_entity
+   tx2: all fact products of the chunk (fact rows + fact_vec row when an embedding is available + fact_entity
         + entity + fact_link + confidence deltas on existing opinions) + chunk.status extracting→done,
         guarded by the claim token (zero rows updated ⇒ the claim was lost to a stale-steal →
         abort and write nothing)
@@ -290,18 +308,18 @@ Key points:
 | Path | Trigger | Rows inserted | Rows modified |
 |---|---|---|---|
 | A0. Receive and chunk (first two inbox stages) | caller ingests D | source(payload), chunk(text+hash, status=pending; hash conflicts skipped) | source.status→chunked |
-| A1. Retain extraction (single-chunk transaction; A2/A3 land in the same transaction) | after chunks are persisted (sync or rescan) | fact(world/experience, plus extraction-produced opinions; embedding written inline), fact_entity, entity, fact_link | chunk.status→done; existing opinions' confidence/text |
+| A1. Retain extraction (single-chunk transaction; A2/A3 land in the same transaction) | after chunks are persisted (sync or rescan) | fact(world/experience, plus extraction-produced opinions) + fact_vec (when embedded), fact_entity, entity, fact_link | chunk.status→done; existing opinions' confidence/text |
 | A2. Opinion reinforcement | inside A1's transaction (Assess runs outside) | — | fact.confidence (c±α), possibly text |
 | A3. Background merge | biographical info encountered during retain (MergeLLM outside the transaction) | — | bank.background |
-| B. Reflect opinion formation | query-driven response | fact(opinion, embedding inline), fact_entity | — |
-| C. Observation background synthesis | entity touched by new facts (runtime scheduling: in-memory queue or periodic sweep; work list derived from state — e.g. e's latest evidence row is newer than its latest observation row) | fact(observation, embedding inline) + its full fact_entity bindings | — (append-only, no destructive replacement; old batches reclaimed by runtime GC by age/count cap; recall prefers recency) |
+| B. Reflect opinion formation | query-driven response | fact(opinion) + fact_vec, fact_entity | — |
+| C. Observation background synthesis | entity touched by new facts (runtime scheduling: in-memory queue or periodic sweep; work list derived from state — e.g. e's latest evidence row is newer than its latest observation row) | fact(observation) + fact_vec + its full fact_entity bindings | — (append-only, no destructive replacement; old batches reclaimed by runtime GC by age/count cap; recall prefers recency) |
 | D. Programmatic direct write (undecided, not in paper) | application writes explicitly | depends on API | — |
 
 ### 5.4 Read Path (Recall's Four Channels) and Steps That Produce No Facts
 
 | Channel | Data source |
 |---|---|
-| Semantic (vector) | `fact.embedding` (generated from fact text + human-readable time prefix; ANN indexing is adapter implementation freedom — the core only sees value reads and filtered scans) |
+| Semantic (vector) | `fact_vec.embedding` (generated from fact text + human-readable time prefix; missing row = backfill pending; ANN indexing is adapter implementation freedom) |
 | Keyword (BM25) | `fact.text` (whether to also cover `chunk.text` as a verbatim fallback: see §7) |
 | Graph spreading | `fact_link` + `fact_entity` (activation starts from semantic hits; entity adjacency derived from bindings) |
 | Temporal filter | `fact.occurred_*` / `mentioned_at` interval matching |
@@ -316,13 +334,15 @@ One row's data has three clocks: ingest time (source/chunk created_at), conversa
 
 | Capability | Relational (PG) | Embedded (SQLite-like) | Other |
 |---|---|---|---|
-| Vector retrieval acceleration (adapter freedom, invisible to core) | pgvector: `vector` column type + HNSW | in-row BLOB + brute-force cosine / sqlite-vec / in-memory HNSW (usearch) | external vector store sidecar (adapter-internal materialized copy, keyed by fact.id) |
+| Vector retrieval acceleration (adapter freedom, invisible to core) | pgvector: `vector` column type + HNSW | in-row BLOB + sqlite-vec vec0 (exact cosine) / in-memory HNSW (usearch) | external vector store sidecar (adapter-internal materialized copy, keyed by fact.id) |
 | BM25/FTS | GIN + tsvector / pg_trgm | FTS5 | external index; LIKE fallback (quality loss) |
 | Temporal interval overlap | tstzrange + GiST | occurred_start/occurred_end dual index + filter | same |
 | Graph traversal | recursive CTE / self-join (undirected edges are dual-row, adjacency is a single-predicate query; entity adjacency joined via fact_entity) | same | graph store sidecar |
 | JSON | jsonb | TEXT | structured expansion |
 | Three-level idempotency | receive = payload persisted; chunking = unique index + ON CONFLICT skip; extraction = status flip inside a single-chunk transaction (optimistic claim) | same (composite unique index + UPSERT) | backends without constraints fall back to prechecks + rescan |
 | Background task claiming | SELECT … FOR UPDATE SKIP LOCKED | optimistic CAS (status + attempts) | same |
+
+> SQLite implementation: `fact_vec` is the sole vector storage, created by migration `0001` as a vec0 table (`fact_id`, `bank_id`, `embedding float[1536] distance_metric=cosine`). Embedding rows are written explicitly by tx2/backfill; a delete trigger removes the row with its fact. `fetch_facts` LEFT JOINs it (missing ⇒ `None`); `search_vector` queries it directly. A model with a different dimension requires rebuilding the table.
 
 ## 7. Open Decisions for Implementation
 
@@ -352,5 +372,5 @@ Scheduling principle: implement what is in the paper first. Three tiers — **A 
 14. Privacy/material cleanup: no such mechanism in the paper; under the inbox model the source text remains in the database; when needed, a deployment-level ops job clears the text columns `source.payload_text` and `chunk.text` (structural rows and hashes retained, so idempotency keys stay valid) — no schema support required.
 15. Entity mention-variant cache (`entity_alias`): removed from the schema; resolution variants are derived from `fact_entity.mention_text` (the exact path goes straight through the `entity.canonical_name` index; the miss path aggregates bindings per candidate entity, cacheable in memory within a call). If aggregation becomes slow at large scale, re-materialize the cache table — a pure addition.
 16. Opinion evolution audit table (`opinion_history`): removed from the schema; confidence is updated in place (c±α), and reinforcement idempotency is approximately guaranteed by "single-chunk transaction rollback + evidence-row lifecycle"; there is no dedup anchor (ops-level replays need care). If opinion-trajectory auditing is needed later (paper §5.7 evolution examples, controlled-forgetting substrate), add the table back — the structure is ready: event(formed/reinforced/weakened/contradicted/revised), old/new_confidence, trigger_fact_id, reason; add `old_text` to record the formulation before a rewrite.
-17. Persistent task queue (`background_task`): removed — background work lists can be derived from in-database state (NULL-embedding scans, entity evidence-change comparison, in-place semantic-link rebuild during cutover), and scheduling belongs to runtime components. If cross-process reliable dispatch / priorities / precise retry semantics are ever needed, add the table back (structure ready: task_type / payload / status / attempts / run_after).
+17. Persistent task queue (`background_task`): removed — background work lists can be derived from in-database state (facts without a `fact_vec` row, entity evidence-change comparison, in-place semantic-link rebuild during cutover), and scheduling belongs to runtime components. If cross-process reliable dispatch / priorities / precise retry semantics are ever needed, add the table back (structure ready: task_type / payload / status / attempts / run_after).
 18. Source payload-shape tag (`source.kind` / `SourceKind`): removed — it has no pipeline consumer (normalization dispatch follows the caller's `RawPayload` variant; chunking depends on the normalized turn spans, not on the tag) and the stored value would be provenance-only. If post-ingest per-kind policy is ever needed (e.g. session alignment only for transcripts, per-artifact-type purge), add the enum column back — a pure addition.

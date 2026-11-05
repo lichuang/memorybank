@@ -248,9 +248,9 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
 
 **Status**: ✅ (2026-10-26)
 
-- **Content**: 7-table DDL + FTS + indexes + constraints.
+- **Content**: 8-table DDL + FTS + indexes + constraints.
 - **Design**:
-  - Tables follow the schema fields; FTS5: `CREATE VIRTUAL TABLE fact_fts USING fts5(fact_id UNINDEXED, text, tokenize='trigram')` (maintained manually);
+  - Tables follow the schema fields; `fact_vec` is a vec0 table (`fact_id`, `bank_id`, `embedding float[1536] distance_metric=cosine`) with a delete trigger; FTS5: `CREATE VIRTUAL TABLE fact_fts USING fts5(fact_id UNINDEXED, text, tokenize='trigram')` (maintained manually);
   - Unique: `chunk(bank_id, content_hash)`, `entity(bank_id, canonical_name)`, `fact_link(from_fact_id, to_fact_id, link_type, relation)`;
   - CHECK: enum domains; `(fact_type='opinion' AND chunk_id IS NULL) => confidence IS NOT NULL`;
   - Indexes: `fact(bank_id)`, `fact(chunk_id)`, `fact(bank_id, occurred_start)`, `source(bank_id,status)`, `fact_entity(bank_id, entity_id)`, `fact_entity(bank_id, fact_id)`, `fact_link(bank_id, from_fact_id)`, `fact_link(bank_id, to_fact_id)`.
@@ -534,8 +534,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32   // paper §4.1.4 eq. (5)
 pub async fn build_semantic_links(store:&dyn Store, bank:BankId, new_facts:&[Fact],
                                   cfg:&LinkConfig, now:Timestamp) -> Result<Vec<NewLink>>
 ```
-  For every new fact with an embedding, `Store::search_vector` (brute-force cosine in the
-  SQLite adapter; a dimension mismatch is `Config`) supplies committed candidates; the other
+  For every new fact with an embedding, `Store::search_vector` (SQLite: the `fact_vec` vec0
+  index created by migration 0001, fixed 1536 dimensions, cosine distance, triggers mirror
+  the `fact_vec` table, which is the sole vector storage) supplies committed candidates; a dimension mismatch is `Config`; the other
   new facts of the batch are compared in memory because they are not committed yet. Candidates
   are deduplicated by id, filtered by `cos >= semantic_threshold`, sorted by `(score desc, id
   asc)`, and truncated to `semantic_top_k`. Each selected candidate yields exactly one directed
@@ -579,7 +580,7 @@ pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
 **Status**: ❌
 
 - **Content**: commit every product in one transaction, guarded by the claim token.
-- **Design**: insert order entity→fact→fact_entity→fact_link→FTS→stat updates→opinion updates; then flip `chunk.status=done` with `WHERE id=? AND status='extracting' AND updated_at=?claimed_at`; 0 rows updated ⇒ the claim was lost to a stale-steal ⇒ return `Error::Conflict` and write nothing. Any failure rolls back.
+- **Design**: insert order entity→fact→fact_vec (when embedded)→fact_entity→fact_link→FTS→stat updates→opinion updates; then flip `chunk.status=done` with `WHERE id=? AND status='extracting' AND updated_at=?claimed_at`; 0 rows updated ⇒ the claim was lost to a stale-steal ⇒ return `Error::Conflict` and write nothing. Any failure rolls back.
 - **Acceptance**: no residual rows after failure; after success, facts/edges/statistics are consistent; a second committer with an outdated `claimed_at` is rejected and leaves no rows.
 - **Tests**: inject failure (e.g. FTS unique conflict) and verify full rollback; replaying the same commit is rejected (status already done); stale-steal loser rejected.
 
@@ -964,14 +965,14 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
 
 **Status**: ❌
 
-- **Content**: accelerate `Store::search_vector` when a bank's vector count or query load outgrows the current implementation.
-- **Current implementation**: the SQLite adapter streams every non-null embedding, scores cosine in Rust, and keeps a bounded top-k heap — exact results, `O(k)` memory, `O(n·d)` time, no index.
+- **Content**: when exact sqlite-vec search is no longer enough, add an approximate index (HNSW) and benchmark it.
+- **Current implementation (P1-13)**: migration `0001` creates `fact_vec` (`fact_id`, `bank_id`, `embedding float[1536] distance_metric=cosine`) as the sole vector storage; a fact without a row is pending backfill, and a delete trigger removes the vector with its fact. Queries are exact, run in SQLite's C path, and no longer scan/decode BLOBs in Rust. Changing to a different embedding dimension requires rebuilding the table.
 - **Design**: the engine only sees `Store::search_vector`, so acceleration is adapter-internal:
-  - `sqlite-vec` `vec0` virtual table: move the scan into SQLite's C/SIMD path and avoid shipping every BLOB to Rust; still exhaustive (faster exact search, no recall loss).
-  - True ANN (HNSW via `usearch`, or an external vector store): sub-linear queries at the cost of approximate recall; index persistence, tombstones/deletes, and rebuilds on embedding-model cutover are adapter responsibilities.
+  - HNSW via `usearch` (in-process) or an external vector store: sub-linear queries at the cost of approximate recall; index persistence, tombstones/deletes, and rebuilds on embedding-model cutover are adapter responsibilities.
   - PostgreSQL + pgvector HNSW becomes available with the deferred PG adapter (P5-1).
-- **Acceptance**: the same `Store` contract tests pass; exact brute force remains available as a fallback; recall/latency measured on a representative bank before switching; model cutover rebuilds the index.
-- **Tests**: adapter contract suite; benchmark comparing exact vs indexed recall/latency; index rebuild on generation cutover.
+  - Index maintenance is automatic: the schema triggers mirror any `fact` insert/update/delete into `fact_vec`, so tx2 needs no special handling.
+- **Acceptance**: the same `Store` contract tests pass; the exact sqlite-vec path remains available as a fallback; recall/latency measured on a representative bank before switching; model cutover rebuilds the index.
+- **Tests**: adapter contract suite; benchmark comparing exact (vec0) vs HNSW recall/latency; index rebuild on generation cutover.
 
 ---
 
