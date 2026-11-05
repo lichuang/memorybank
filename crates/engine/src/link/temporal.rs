@@ -358,6 +358,7 @@ mod tests {
       temporal_window: Duration::from_millis(window_ms),
       temporal_sigma: Duration::from_millis(sigma_ms),
       temporal_top_k: 5,
+      ..LinkConfig::default()
     }
   }
 

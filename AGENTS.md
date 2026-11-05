@@ -14,7 +14,7 @@ Design docs (read in this order):
 
 | Document | Purpose |
 |---|---|
-| `design/phase.md` | **What to do**: 66 implementation tasks (P0–P5) with content / design / acceptance / tests and status markers |
+| `design/phase.md` | **What to do**: 67 implementation tasks (P0–P5) with content / design / acceptance / tests and status markers |
 | `design/design.md` | **How to build it**: workspace layout, port contracts, pipeline implementation, testing strategy |
 | `design/memory-schema.md` | **What the data looks like**: 7 tables, admission criteria (§1.3), data flow, retired constructs (§7.C) |
 | `docs/hindsight.pdf` | The paper — the final authority for design trade-offs |

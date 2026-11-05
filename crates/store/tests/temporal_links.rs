@@ -91,6 +91,7 @@ fn config(window_hours: i64, sigma_seconds: u64, top_k: usize) -> LinkConfig {
     temporal_window: Duration::from_secs(window_hours as u64 * 3_600),
     temporal_sigma: Duration::from_secs(sigma_seconds),
     temporal_top_k: top_k,
+    ..LinkConfig::default()
   }
 }
 

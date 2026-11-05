@@ -3,6 +3,7 @@
 //! Thresholds and budgets live here as runtime configuration; none of them is
 //! persisted (the schema stores only the edges that were finally kept).
 
+pub mod semantic;
 pub mod temporal;
 
 use std::time::Duration;
@@ -18,6 +19,10 @@ pub struct LinkConfig {
   /// Neighbor budget per new fact: each new fact keeps its `temporal_top_k`
   /// closest candidates (pairs are deduplicated before writing).
   pub temporal_top_k: usize,
+  /// Neighbor budget per new fact for semantic edges.
+  pub semantic_top_k: usize,
+  /// Cosine threshold θs: candidates below it never become edges.
+  pub semantic_threshold: f32,
 }
 
 impl Default for LinkConfig {
@@ -26,8 +31,11 @@ impl Default for LinkConfig {
       temporal_window: Duration::from_secs(24 * 60 * 60),
       temporal_sigma: Duration::from_secs(6 * 60 * 60),
       temporal_top_k: 5,
+      semantic_top_k: 5,
+      semantic_threshold: 0.8,
     }
   }
 }
 
+pub use semantic::{build_semantic_links, cosine_similarity};
 pub use temporal::{build_temporal_links, temporal_weight};

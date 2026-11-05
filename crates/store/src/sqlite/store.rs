@@ -5,10 +5,12 @@
 //! [`Error::Fatal`] instead of panicking, so an accidental call is visible as an
 //! error rather than a crash.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use engine::link::cosine_similarity;
 use engine::ports::{
   ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NewChunk, NewEntity,
   NewObservation, NewOpinion, Store, WorkLists,
@@ -19,6 +21,7 @@ use engine::types::{
   to_epoch_millis,
 };
 use engine::{Error, Result};
+use futures_util::TryStreamExt;
 use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
 use tracing::warn;
 
@@ -277,11 +280,65 @@ impl Store for SqliteStore {
 
   async fn search_vector(
     &self,
-    _bank: BankId,
-    _query: &[f32],
-    _k: usize,
+    bank: BankId,
+    query: &[f32],
+    k: usize,
   ) -> Result<Vec<(FactId, f32)>> {
-    Err(not_implemented("search_vector"))
+    if k == 0 {
+      return Ok(Vec::new());
+    }
+
+    // Brute-force scan, streamed row by row: only the current row's BLOB and a
+    // bounded top-k heap live in memory (SQLite has no ANN index).
+    let mut rows = sqlx::query_as::<_, (String, Vec<u8>)>(
+      "SELECT id, embedding FROM fact WHERE bank_id = ? AND embedding IS NOT NULL",
+    )
+    .bind(bank.to_string())
+    .fetch(&self.pool);
+
+    let mut heap: BinaryHeap<Scored> = BinaryHeap::with_capacity(k);
+
+    while let Some((id, blob)) = rows
+      .try_next()
+      .await
+      .map_err(|error| map_read("fact", error))?
+    {
+      let id = FactId::parse(&id)
+        .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
+
+      if !blob.len().is_multiple_of(4) {
+        return Err(Error::fatal(format!(
+          "corrupt embedding blob for fact {id}: {} bytes is not a multiple of 4",
+          blob.len()
+        )));
+      }
+      let dimensions = blob.len() / 4;
+      if dimensions != query.len() {
+        return Err(Error::config(format!(
+          "embedding dimension mismatch: query has {} dimensions, fact {id} has {dimensions}",
+          query.len()
+        )));
+      }
+
+      let vector = decode_embedding_bytes(&blob)?;
+      let score = cosine_similarity(query, &vector);
+      keep_best(&mut heap, Scored { id, score }, k);
+    }
+
+    let mut results: Vec<Scored> = heap.into_vec();
+    results.sort_by(|left, right| {
+      right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(
+      results
+        .into_iter()
+        .map(|scored| (scored.id, scored.score))
+        .collect(),
+    )
   }
 
   async fn search_bm25(
@@ -850,26 +907,76 @@ fn fact_from_row(row: FactRow) -> Result<Option<Fact>> {
 /// fixed-size vector); the tx2 write path must use this same encoding.
 fn decode_embedding(bytes: Option<Vec<u8>>) -> Result<Option<Vec<f32>>> {
   bytes
-    .map(|bytes| {
-      if bytes.len() % 4 != 0 {
-        return Err(Error::fatal(format!(
-          "corrupt embedding blob: {} bytes is not a multiple of 4",
-          bytes.len()
-        )));
-      }
-
-      Ok(
-        bytes
-          .chunks_exact(4)
-          .map(|chunk| {
-            let mut word = [0_u8; 4];
-            word.copy_from_slice(chunk);
-            f32::from_le_bytes(word)
-          })
-          .collect(),
-      )
-    })
+    .map(|bytes| decode_embedding_bytes(&bytes))
     .transpose()
+}
+
+fn decode_embedding_bytes(bytes: &[u8]) -> Result<Vec<f32>> {
+  if !bytes.len().is_multiple_of(4) {
+    return Err(Error::fatal(format!(
+      "corrupt embedding blob: {} bytes is not a multiple of 4",
+      bytes.len()
+    )));
+  }
+
+  Ok(
+    bytes
+      .chunks_exact(4)
+      .map(|chunk| {
+        let mut word = [0_u8; 4];
+        word.copy_from_slice(chunk);
+        f32::from_le_bytes(word)
+      })
+      .collect(),
+  )
+}
+
+/// A scored candidate inside the bounded top-k heap.
+///
+/// `Ord` is intentionally reversed: the heap root is the **worst** kept
+/// candidate (lowest score; on equal scores, the largest id), so a better
+/// candidate can evict it and the final order stays `(score desc, id asc)`.
+#[derive(Debug, Clone, Copy)]
+struct Scored {
+  id: FactId,
+  score: f32,
+}
+
+impl PartialEq for Scored {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id && self.score.total_cmp(&other.score) == Ordering::Equal
+  }
+}
+
+impl Eq for Scored {}
+
+impl PartialOrd for Scored {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for Scored {
+  fn cmp(&self, other: &Self) -> Ordering {
+    other
+      .score
+      .total_cmp(&self.score)
+      .then_with(|| self.id.cmp(&other.id))
+  }
+}
+
+fn keep_best(heap: &mut BinaryHeap<Scored>, candidate: Scored, k: usize) {
+  if heap.len() < k {
+    heap.push(candidate);
+    return;
+  }
+
+  if let Some(worst) = heap.peek()
+    && candidate.cmp(worst) == Ordering::Less
+  {
+    heap.pop();
+    heap.push(candidate);
+  }
 }
 
 fn timestamp(millis: i64) -> Result<Timestamp> {

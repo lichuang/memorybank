@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 12/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/9 (24/66 total)**
+> Current progress: **P0 12/12 · P1 13/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (25/67 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -503,7 +503,9 @@ pub async fn build_temporal_links(store:&dyn Store, bank:BankId, new_facts:&[Fac
                                   cfg:&LinkConfig, now:Timestamp) -> Result<Vec<NewLink>>
 pub struct LinkConfig { pub temporal_window: Duration /* 24h */,
                         pub temporal_sigma: Duration  /* 6h */,
-                        pub temporal_top_k: usize     /* 5 */ }
+                        pub temporal_top_k: usize     /* 5 */,
+                        pub semantic_top_k: usize     /* 5, added in P1-13 */,
+                        pub semantic_threshold: f32   /* 0.8, added in P1-13 */ }
 ```
   Uses **occurrence intervals** (`occurred_start..occurred_end`), as clarified in
   `memory-schema.md` §5.5: `gap = 0` for overlapping or touching intervals, otherwise the
@@ -523,12 +525,27 @@ pub struct LinkConfig { pub temporal_window: Duration /* 24h */,
 
 ## P1-13 Semantic Link Construction
 
-**Status**: ❌
+**Status**: ✅ (2026-11-05)
 
 - **Content**: directed top-k.
-- **Design**: `pub async fn build_semantic_links(store, bank, new_facts, cfg) -> Result<Vec<NewLink>>`; for each new fact: `search_vector` (exclude self, cos≥θs), take top-K; each edge `from=new, to=cand, weight=cos`.
+- **Design**:
+```rust
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32   // paper §4.1.4 eq. (5); 0 for zero norms
+pub async fn build_semantic_links(store:&dyn Store, bank:BankId, new_facts:&[Fact],
+                                  cfg:&LinkConfig, now:Timestamp) -> Result<Vec<NewLink>>
+```
+  For every new fact with an embedding, `Store::search_vector` (brute-force cosine in the
+  SQLite adapter; a dimension mismatch is `Config`) supplies committed candidates; the other
+  new facts of the batch are compared in memory because they are not committed yet. Candidates
+  are deduplicated by id, filtered by `cos >= semantic_threshold`, sorted by `(score desc, id
+  asc)`, and truncated to `semantic_top_k`. Each selected candidate yields exactly one directed
+  row (`from = new`, `to = candidate`, `weight = cos` clamped to `[0, 1]`); no reverse row is
+  invented. Facts without embeddings produce no edges (backfilled later).
+  `semantic_threshold` must be in `[0, 1]`; `semantic_top_k = 0` disables the builder.
 - **Acceptance**: directed single rows; no B→A unless B also selects A; within budget.
-- **Tests**: deterministic distribution with budget 2; self excluded; θs filtering.
+- **Tests**: cosine unit tests; vector-search ranking/limit/tie-break/dimension mismatch/empty
+  bank; similar vs weak candidates; top-k budget; new-new reciprocal selection; self exclusion;
+  missing embeddings; out-of-range threshold; deterministic selection.
 
 ## P1-14 Causal Link Construction
 
@@ -942,6 +959,19 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
   - Timeout, concurrency, batch size, and embedding normalization are adapter configuration, not schema or engine concerns.
 - **Acceptance**: a local endpoint (or in-process model) satisfies the same `Llm` / `Embedder` contract suite as the HTTP provider; no blocking calls on the async runtime; no schema change; default build does not pull in model-runtime dependencies.
 - **Tests**: wiremock for the HTTP path; in-process adapter `#[ignore]`d when weights are unavailable; repair-path unit tests (invalid JSON → repaired → valid; repair exhausted → `Fatal`).
+
+## P5-10 Vector Index Acceleration
+
+**Status**: ❌
+
+- **Content**: accelerate `Store::search_vector` when a bank's vector count or query load outgrows the current implementation.
+- **Current implementation**: the SQLite adapter streams every non-null embedding, scores cosine in Rust, and keeps a bounded top-k heap — exact results, `O(k)` memory, `O(n·d)` time, no index.
+- **Design**: the engine only sees `Store::search_vector`, so acceleration is adapter-internal:
+  - `sqlite-vec` `vec0` virtual table: move the scan into SQLite's C/SIMD path and avoid shipping every BLOB to Rust; still exhaustive (faster exact search, no recall loss).
+  - True ANN (HNSW via `usearch`, or an external vector store): sub-linear queries at the cost of approximate recall; index persistence, tombstones/deletes, and rebuilds on embedding-model cutover are adapter responsibilities.
+  - PostgreSQL + pgvector HNSW becomes available with the deferred PG adapter (P5-1).
+- **Acceptance**: the same `Store` contract tests pass; exact brute force remains available as a fallback; recall/latency measured on a representative bank before switching; model cutover rebuilds the index.
+- **Tests**: adapter contract suite; benchmark comparing exact vs indexed recall/latency; index rebuild on generation cutover.
 
 ---
 
