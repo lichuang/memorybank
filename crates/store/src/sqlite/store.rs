@@ -276,8 +276,23 @@ impl Store for SqliteStore {
     }
   }
 
-  async fn commit_chunk(&self, _commit: ChunkCommit) -> Result<()> {
-    Err(not_implemented("commit_chunk"))
+  async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()> {
+    let mut tx = self
+      .pool
+      .begin()
+      .await
+      .map_err(|error| map_write("chunk commit", error))?;
+
+    match commit_chunk_tx(&mut tx, &commit).await {
+      Ok(()) => tx
+        .commit()
+        .await
+        .map_err(|error| map_write("chunk commit", error)),
+      Err(error) => {
+        let _ = tx.rollback().await;
+        Err(error)
+      }
+    }
   }
 
   async fn search_vector(
@@ -631,6 +646,228 @@ impl Store for SqliteStore {
   }
 }
 
+/// Executes tx2: writes every product and flips the chunk status under the
+/// claim token.
+async fn commit_chunk_tx(tx: &mut Transaction<'_, Sqlite>, commit: &ChunkCommit) -> Result<()> {
+  // The DTO carries no bank; the chunk row is the authority.
+  let bank: Option<String> = sqlx::query_scalar("SELECT bank_id FROM chunk WHERE id = ?")
+    .bind(commit.chunk_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| map_read("chunk", error))?;
+  let bank = bank.ok_or_else(|| Error::not_found("chunk", commit.chunk_id.to_string()))?;
+  let bank = BankId::parse(&bank)
+    .map_err(|error| Error::fatal(format!("corrupt bank id `{bank}`: {error}")))?;
+
+  // 1. Entities. A canonical-name conflict reuses the existing row and rewrites
+  // the ids referenced by this commit (bindings + statistics).
+  let mut remap: HashMap<EntityId, EntityId> = HashMap::new();
+  for entity in &commit.entities {
+    if entity.bank_id != bank {
+      return Err(Error::config(format!(
+        "entity {} belongs to bank {}, not {}",
+        entity.id, entity.bank_id, bank
+      )));
+    }
+
+    let inserted = sqlx::query(
+      "INSERT INTO entity (id, bank_id, canonical_name, entity_type, mention_count, first_seen, \
+       last_seen, attrs, created_at, updated_at) \
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+       ON CONFLICT(bank_id, canonical_name) DO NOTHING",
+    )
+    .bind(entity.id.to_string())
+    .bind(bank.to_string())
+    .bind(&entity.canonical_name)
+    .bind(entity.entity_type.as_str())
+    .bind(i64::from(entity.mention_count))
+    .bind(entity.first_seen.map(to_epoch_millis))
+    .bind(entity.last_seen.map(to_epoch_millis))
+    .bind(entity.attrs.as_ref().map(serde_json::Value::to_string))
+    .bind(to_epoch_millis(entity.created_at))
+    .bind(to_epoch_millis(entity.updated_at))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("entity", error))?;
+
+    if inserted.rows_affected() == 0 {
+      let existing: String =
+        sqlx::query_scalar("SELECT id FROM entity WHERE bank_id = ? AND canonical_name = ?")
+          .bind(bank.to_string())
+          .bind(&entity.canonical_name)
+          .fetch_one(&mut **tx)
+          .await
+          .map_err(|error| map_read("entity", error))?;
+      let existing = EntityId::parse(&existing)
+        .map_err(|error| Error::fatal(format!("corrupt entity id `{existing}`: {error}")))?;
+      if existing != entity.id {
+        remap.insert(entity.id, existing);
+      }
+    }
+  }
+
+  // 2. Facts, plus the 1:1 vector row when an embedding is available.
+  for fact in &commit.facts {
+    if fact.bank_id != bank {
+      return Err(Error::config(format!(
+        "fact {} belongs to bank {}, not {}",
+        fact.id, fact.bank_id, bank
+      )));
+    }
+
+    sqlx::query(
+      "INSERT INTO fact (id, bank_id, fact_type, text, chunk_id, occurred_start, occurred_end, \
+       mentioned_at, confidence, access_count, attrs, created_at, updated_at) \
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+    )
+    .bind(fact.id.to_string())
+    .bind(bank.to_string())
+    .bind(fact.fact_type.as_str())
+    .bind(&fact.text)
+    .bind(fact.chunk_id.map(|id| id.to_string()))
+    .bind(fact.occurred.start().map(to_epoch_millis))
+    .bind(fact.occurred.end().map(to_epoch_millis))
+    .bind(fact.mentioned_at.map(to_epoch_millis))
+    .bind(fact.confidence)
+    .bind(fact.attrs.as_ref().map(serde_json::Value::to_string))
+    .bind(to_epoch_millis(fact.created_at))
+    .bind(to_epoch_millis(fact.created_at))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("fact", error))?;
+
+    if let Some(embedding) = &fact.embedding {
+      sqlx::query(
+        "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
+         SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+      )
+      .bind(encode_embedding(embedding))
+      .bind(fact.id.to_string())
+      .execute(&mut **tx)
+      .await
+      .map_err(|error| map_write("fact_vec", error))?;
+    }
+  }
+
+  // 3. Bindings (entity ids rewritten after canonical-name conflicts).
+  for binding in &commit.bindings {
+    if binding.bank_id != bank {
+      return Err(Error::config(format!(
+        "binding references bank {}, not {}",
+        binding.bank_id, bank
+      )));
+    }
+
+    let entity_id = remap
+      .get(&binding.entity_id)
+      .copied()
+      .unwrap_or(binding.entity_id);
+    sqlx::query(
+      "INSERT INTO fact_entity (bank_id, fact_id, entity_id, mention_text, created_at, updated_at) \
+       VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(bank.to_string())
+    .bind(binding.fact_id.to_string())
+    .bind(entity_id.to_string())
+    .bind(&binding.mention_text)
+    .bind(to_epoch_millis(binding.created_at))
+    .bind(to_epoch_millis(binding.created_at))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("fact_entity", error))?;
+  }
+
+  // 4. Graph edges (temporal pairs were already expanded by the builders).
+  for link in &commit.links {
+    if link.bank_id != bank {
+      return Err(Error::config(format!(
+        "link {} belongs to bank {}, not {}",
+        link.id, link.bank_id, bank
+      )));
+    }
+
+    sqlx::query(
+      "INSERT INTO fact_link (id, bank_id, from_fact_id, to_fact_id, link_type, relation, weight, \
+       created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(link.id.to_string())
+    .bind(bank.to_string())
+    .bind(link.from.to_string())
+    .bind(link.to.to_string())
+    .bind(link.link_type.as_str())
+    .bind(link.relation.map(|relation| relation.as_str()))
+    .bind(link.weight)
+    .bind(to_epoch_millis(link.created_at))
+    .bind(to_epoch_millis(link.created_at))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("fact_link", error))?;
+  }
+
+  // 5. Full-text corpus (maintained manually; one row per fact).
+  for fact in &commit.facts {
+    sqlx::query("INSERT INTO fact_fts (fact_id, text) VALUES (?, ?)")
+      .bind(fact.id.to_string())
+      .bind(&fact.text)
+      .execute(&mut **tx)
+      .await
+      .map_err(|error| map_write("fact_fts", error))?;
+  }
+
+  // 6. Entity statistics deltas, with remapped ids.
+  let mut stats = commit.entity_stats.clone();
+  for stat in &mut stats {
+    if let Some(mapped) = remap.get(&stat.entity_id) {
+      stat.entity_id = *mapped;
+    }
+  }
+  apply_entity_stats(tx, bank, &stats).await?;
+
+  // 7. Opinion confidence/text updates.
+  for update in &commit.opinion_updates {
+    let updated = sqlx::query(
+      "UPDATE fact SET confidence = ?, text = COALESCE(?, text), updated_at = ? \
+       WHERE id = ? AND bank_id = ? AND fact_type = 'opinion'",
+    )
+    .bind(update.new_confidence)
+    .bind(&update.new_text)
+    .bind(to_epoch_millis(update.updated_at))
+    .bind(update.opinion_id.to_string())
+    .bind(bank.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("fact", error))?;
+
+    if updated.rows_affected() == 0 {
+      return Err(Error::fatal(format!(
+        "opinion update references missing opinion {}",
+        update.opinion_id
+      )));
+    }
+  }
+
+  // 8. Finish the claim: conditional on the token written by claim_chunk.
+  let finished = sqlx::query(
+    "UPDATE chunk SET status = 'done', updated_at = ? \
+     WHERE id = ? AND status = 'extracting' AND updated_at = ?",
+  )
+  .bind(to_epoch_millis(commit.completed_at))
+  .bind(commit.chunk_id.to_string())
+  .bind(to_epoch_millis(commit.claimed_at))
+  .execute(&mut **tx)
+  .await
+  .map_err(|error| map_write("chunk", error))?;
+
+  if finished.rows_affected() == 0 {
+    return Err(Error::conflict(
+      "chunk",
+      format!("claim for {} is no longer valid", commit.chunk_id),
+    ));
+  }
+
+  Ok(())
+}
+
 /// Applies entity evidence deltas inside the caller's tx2 transaction.
 ///
 /// `mention_count` counts world/experience bindings only, so the caller supplies
@@ -640,8 +877,7 @@ impl Store for SqliteStore {
 /// means the commit references an entity outside the chunk's bank; that is
 /// corrupt input, not a retryable condition.
 //
-// Wired into `commit_chunk` (P1-16); until then only the transaction tests call it.
-#[allow(dead_code)]
+// Called by `commit_chunk` (P1-16) after the binding rows are written.
 async fn apply_entity_stats(
   tx: &mut Transaction<'_, Sqlite>,
   bank: BankId,

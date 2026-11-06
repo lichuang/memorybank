@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 14/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (26/67 total)**
+> Current progress: **P0 12/12 · P1 15/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (27/67 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -571,8 +571,9 @@ pub fn causal_links(bank:BankId, extracted:&[ExtractedFact], ids:&[FactId],
 
 ## P1-15 Opinion Reinforcement
 
-**Status**: ❌
+**Status**: ❌ (on hold — opinion update semantics under review)
 
+- **Hold reason**: confidence NULL / text rewrite / multi-fact aggregation rules are unresolved; the commit path (P1-16) still accepts `opinion_updates`, so this can be wired later without blocking the pipeline.
 - **Content**: candidates → Assess → confidence update.
 - **Design**:
 ```rust
@@ -589,12 +590,23 @@ pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
 
 ## P1-16 `commit_chunk` (tx2)
 
-**Status**: ❌
+**Status**: ✅ (2026-11-06)
 
 - **Content**: commit every product in one transaction, guarded by the claim token.
-- **Design**: insert order entity→fact→fact_vec (when embedded)→fact_entity→fact_link→FTS→stat updates→opinion updates; then flip `chunk.status=done` with `WHERE id=? AND status='extracting' AND updated_at=?claimed_at`; 0 rows updated ⇒ the claim was lost to a stale-steal ⇒ return `Error::Conflict` and write nothing. Any failure rolls back.
-- **Acceptance**: no residual rows after failure; after success, facts/edges/statistics are consistent; a second committer with an outdated `claimed_at` is rejected and leaves no rows.
-- **Tests**: inject failure (e.g. FTS unique conflict) and verify full rollback; replaying the same commit is rejected (status already done); stale-steal loser rejected.
+- **Design**: the bank is resolved from the chunk row (the DTO carries none). Insert order:
+  `entity` → `fact` (+ `fact_vec` when an embedding is present) → `fact_entity` → `fact_link`
+  → `fact_fts` → entity statistics → opinion updates. Entity rows use
+  `ON CONFLICT(bank_id, canonical_name) DO NOTHING`; when a canonical-name conflict reuses an
+  existing id, the commit rewrites the ids in its bindings and statistic deltas before writing
+  them. Finally, flip `chunk.status='done'` with
+  `WHERE id=? AND status='extracting' AND updated_at=?claimed_at`; 0 rows updated ⇒ the claim
+  was stolen ⇒ `Error::Conflict` and the whole transaction rolls back. Any failure rolls back
+  explicitly.
+- **Acceptance**: no residual rows after failure; after success, facts/edges/statistics are
+  consistent; a second committer with an outdated `claimed_at` is rejected and leaves no rows.
+- **Tests**: full product commit; stale-token rejection with no writes; replay rejection;
+  injected duplicate-fact failure with full rollback; canonical-name conflict rewrites bindings
+  and statistics.
 
 ## P1-17 retain API (Async Ack) + Status Query
 
