@@ -73,7 +73,7 @@ cargo doc --workspace --no-deps
 
 ## 5. Coding standards
 
-- Rust edition 2024 (pinned to 1.91.0 by `rust-toolchain.toml`); formatting follows `rustfmt.toml` (2-space indent, reordered imports); clippy clean.
+- Rust edition 2024 (pinned to 1.94.0 by `rust-toolchain.toml`); formatting follows `rustfmt.toml` (2-space indent, reordered imports); clippy clean.
 - **Errors**: `thiserror`; library code uses `engine::Error` (Retryable / Fatal / Config / NotFound / Conflict). No `anyhow` in library code; `anyhow` is fine in tests.
 - **Async**: tokio + `async-trait`; ports must be object-safe (`Box<dyn Store>` must compile); no blocking calls inside async contexts. Heavy CPU work (brute-force vector search, chunking) may use `spawn_blocking`.
 - **Unsafe**: the workspace denies `unsafe_code`; the only exception is `store::sqlite::register_extensions` (sqlite-vec FFI), which must keep its `SAFETY` comment.

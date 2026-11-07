@@ -649,7 +649,7 @@ pub enum RetainState { Received, Queued, Running, Stalled, Completed,
 **Status**: ❌
 
 - **Content**: background processing driven by derived work lists.
-- **Dependency upgrade (prerequisite)**: move to sqlx 0.9 together with this task — bump `rust-toolchain.toml` to 1.94, `libsqlite3-sys` to 0.37 (sqlite-vec FFI), adapt to `SqlSafeStr` / migrator / extension-loading changes, and keep tests, clippy, and docs green.
+- **Dependency upgrade (prerequisite)**: ✅ (2026-11-07) sqlx 0.9, Rust 1.94, `libsqlite3-sys` 0.37; adapted the test SQL helper to `SqlSafeStr`; tests, clippy, and docs green.
 - **Design**:
 ```rust
 pub struct WorkerConfig { pub concurrency: usize, pub poll_interval: Duration,

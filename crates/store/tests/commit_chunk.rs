@@ -126,7 +126,7 @@ async fn opinion(pool: &SqlitePool, bank: BankId) -> FactId {
   id
 }
 
-async fn count(pool: &SqlitePool, sql: &str) -> i64 {
+async fn count(pool: &SqlitePool, sql: &'static str) -> i64 {
   sqlx::query_scalar(sql)
     .fetch_one(pool)
     .await
