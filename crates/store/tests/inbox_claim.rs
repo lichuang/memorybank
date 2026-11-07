@@ -1,4 +1,4 @@
-//! P1-5: atomic chunk claim, stale reclaim, and the monotonic claim token.
+//! Atomic chunk claim, stale reclaim, and the monotonic claim token.
 
 use std::time::Duration;
 

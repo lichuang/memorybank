@@ -1,4 +1,4 @@
-//! P1-9: entity existence, candidate retrieval, and resolution ρ.
+//! Entity existence, candidate retrieval, and resolution ρ.
 
 use engine::ports::{NewEntity, Store};
 use engine::resolve::{MentionContext, ResolveWeights, resolve};

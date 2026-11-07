@@ -1,4 +1,4 @@
-//! P1-12: temporal link construction against a real store.
+//! Temporal link construction against a real store.
 
 use std::time::Duration;
 

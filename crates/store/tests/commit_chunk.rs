@@ -1,4 +1,4 @@
-//! P1-16: `commit_chunk` (tx2) — atomicity and claim-token guarding.
+//! `commit_chunk` (tx2): atomicity and claim-token guarding.
 
 use std::time::Duration;
 

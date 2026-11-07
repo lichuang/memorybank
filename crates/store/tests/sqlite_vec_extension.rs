@@ -1,4 +1,4 @@
-//! P1-13: sqlite-vec registration and the index created by migration 0001.
+//! sqlite-vec registration and the index created by the initial migration.
 
 use store::testing::memory_pool;
 

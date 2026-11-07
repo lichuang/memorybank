@@ -6,6 +6,9 @@
 //!
 //! Implementation starts at phase P0 in `design/phase.md`.
 
+mod retain;
+
 pub use engine;
 pub use llm;
+pub use retain::{MemoryBank, RetainConfig, RetainState, RetainStatus};
 pub use store;

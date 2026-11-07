@@ -122,7 +122,7 @@ Index: (bank_id, status) (rescan finds sources awaiting chunking). A client rese
 | `created_at` | `TS` | chunk persistence time (written by tx1) — listed explicitly to anchor the chunk clock (`updated_at` remains implicit per the global convention and is refreshed on claim/status flips) |
 | `time_start` / `time_end` | `TS` nullable | conversation-clock interval covered by this chunk (available when the caller provides turn timestamps); facts without their own time may default `mentioned_at` from this |
 
-Index: `(bank_id, source_id)` serves per-source progress aggregation (`retain_status`) and source-scoped cleanup (migration `0002`).
+Index: `(bank_id, source_id)` serves per-source progress aggregation (`retain_status`) and source-scoped cleanup (part of the initial migration).
 
 Chunking strategy (configuration): when the caller provides session/turn metadata, **session alignment first**; plain documents fall back to fixed windows (e.g. 2–4k tokens). Each chunk is coarsely extracted into 2–5 narrative facts (paper §4.1.2). Chunking is deterministic pure-memory code (reading the persisted payload) and can be re-run after any crash. Chunking parameters are runtime configuration and are not persisted (boundary reproduction relies on deployment-side configuration).
 

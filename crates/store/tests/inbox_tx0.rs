@@ -1,4 +1,4 @@
-//! P1-3: bank creation plus tx0 (`create_source`).
+//! Bank creation plus tx0 (`create_source`).
 
 use engine::Error;
 use engine::ports::Store;

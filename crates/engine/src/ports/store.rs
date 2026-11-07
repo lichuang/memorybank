@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::types::{
   Bank, BankId, CausalRelation, Chunk, ChunkId, Entity, EntityId, EntityKind, Fact, FactId,
-  FactType, LinkId, LinkType, OccurrenceInterval, Source, SourceId, Timestamp,
+  FactType, LinkId, LinkType, OccurrenceInterval, Source, SourceId, SourceStatus, Timestamp,
 };
 
 /// The persistence contract used by every pipeline.
@@ -148,6 +148,10 @@ pub trait Store: Send + Sync {
     now: Timestamp,
     stale_after: Duration,
   ) -> Result<WorkLists>;
+
+  /// Per-source chunk/fact counts, or `None` when the source does not exist.
+  async fn source_progress(&self, bank: BankId, source: SourceId)
+  -> Result<Option<SourceProgress>>;
 
   /// Writes backfilled embeddings. The engine owns the [`crate::ports::Embedder`],
   /// so the store only persists vectors; `updated_at` is left untouched.
@@ -382,6 +386,27 @@ pub struct WorkLists {
   pub entities_stale_observation: Vec<EntityId>,
 }
 
+/// Derived progress for one source (aggregated from chunk rows; no progress table).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceProgress {
+  /// Current source status (`received` before tx1, `chunked` after).
+  pub source_status: SourceStatus,
+  /// Total chunk rows for the source (including `done` and `failed`).
+  pub chunks_total: usize,
+  /// Chunks still awaiting extraction.
+  pub chunks_pending: usize,
+  /// Chunks currently claimed.
+  pub chunks_extracting: usize,
+  /// Chunks successfully committed.
+  pub chunks_done: usize,
+  /// Chunks dead-lettered.
+  pub chunks_failed: usize,
+  /// Oldest `updated_at` among extracting chunks, for staleness detection.
+  pub oldest_extracting_at: Option<Timestamp>,
+  /// Facts committed from this source's chunks.
+  pub facts_written: usize,
+}
+
 /// Adjacency kind reported by [`Store::neighbors`].
 ///
 /// `Entity` is derived (never stored in `fact_link`) and exists as its own kind
@@ -523,6 +548,13 @@ mod tests {
       _now: Timestamp,
       _stale_after: Duration,
     ) -> Result<WorkLists> {
+      unreachable!("stub")
+    }
+    async fn source_progress(
+      &self,
+      _bank: BankId,
+      _source: SourceId,
+    ) -> Result<Option<SourceProgress>> {
       unreachable!("stub")
     }
     async fn update_embeddings(&self, _embeddings: &[(FactId, Vec<f32>)]) -> Result<usize> {

@@ -24,12 +24,12 @@ async fn migrate_is_idempotent_and_records_the_version() {
   // The schema is usable after the runner.
   let tables: i64 = sqlx::query_scalar(
     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
-     ('bank','source','chunk','fact','entity','fact_entity','fact_link','fact_fts')",
+     ('bank','source','chunk','fact','entity','fact_entity','fact_link','fact_fts','fact_vec')",
   )
   .fetch_one(&pool)
   .await
   .expect("count core tables");
-  assert_eq!(tables, 8);
+  assert_eq!(tables, 9);
 }
 
 #[tokio::test]

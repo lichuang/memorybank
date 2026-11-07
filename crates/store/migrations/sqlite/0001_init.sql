@@ -139,11 +139,12 @@ CREATE VIRTUAL TABLE fact_fts USING fts5(
 CREATE UNIQUE INDEX uq_fact_link_edge
   ON fact_link (from_fact_id, to_fact_id, link_type, COALESCE(relation, ''));
 
--- Deletion/partition and hot-path indexes (phase P0-9 checklist).
+-- Deletion/partition and hot-path indexes.
 CREATE INDEX idx_fact_bank ON fact (bank_id);
 CREATE INDEX idx_fact_chunk ON fact (chunk_id);
 CREATE INDEX idx_fact_bank_occurred ON fact (bank_id, occurred_start);
 CREATE INDEX idx_source_bank_status ON source (bank_id, status);
+CREATE INDEX idx_chunk_bank_source ON chunk (bank_id, source_id);
 CREATE INDEX idx_fact_entity_bank_entity ON fact_entity (bank_id, entity_id);
 CREATE INDEX idx_fact_entity_bank_fact ON fact_entity (bank_id, fact_id);
 CREATE INDEX idx_fact_link_bank_from ON fact_link (bank_id, from_fact_id);

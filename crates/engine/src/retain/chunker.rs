@@ -38,6 +38,16 @@ pub struct ChunkConfig {
   pub min_tokens: usize,
 }
 
+impl Default for ChunkConfig {
+  fn default() -> Self {
+    Self {
+      session_gap: Duration::minutes(30),
+      max_tokens: 1_024,
+      min_tokens: 128,
+    }
+  }
+}
+
 /// One chunk produced by [`chunk`], before ids are assigned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawChunk {

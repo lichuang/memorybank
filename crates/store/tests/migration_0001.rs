@@ -85,12 +85,12 @@ async fn insert_link(
 }
 
 #[tokio::test]
-async fn creates_seven_core_tables_and_the_fts_index() {
+async fn creates_the_core_tables_the_vec_table_and_the_fts_index() {
   let pool = pool().await;
 
   let tables: Vec<String> = sqlx::query_scalar(
     "SELECT name FROM sqlite_master WHERE type = 'table' \
-     AND name IN ('bank','source','chunk','fact','entity','fact_entity','fact_link','fact_fts') \
+     AND name IN ('bank','source','chunk','fact','entity','fact_entity','fact_link','fact_fts','fact_vec') \
      ORDER BY name",
   )
   .fetch_all(&pool)
@@ -107,6 +107,7 @@ async fn creates_seven_core_tables_and_the_fts_index() {
       "fact_entity".to_string(),
       "fact_fts".to_string(),
       "fact_link".to_string(),
+      "fact_vec".to_string(),
       "source".to_string(),
     ]
   );
@@ -117,7 +118,7 @@ async fn creates_seven_core_tables_and_the_fts_index() {
   .fetch_all(&pool)
   .await
   .expect("list indexes");
-  assert_eq!(indexes.len(), 8, "indexes: {indexes:?}");
+  assert_eq!(indexes.len(), 9, "indexes: {indexes:?}");
 }
 
 #[tokio::test]

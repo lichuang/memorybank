@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 15/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (27/67 total)**
+> Current progress: **P0 12/12 · P1 16/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (28/67 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -610,32 +610,46 @@ pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
 
 ## P1-17 retain API (Async Ack) + Status Query
 
-**Status**: ❌
+**Status**: ✅ (2026-11-06)
 
 - **Content**: facade ingest entry point + per-source progress query.
 - **Design**:
 ```rust
-pub async fn retain(&self, bank: BankId, payload: RawPayload) -> Result<SourceId>;
-pub async fn retain_status(&self, bank: BankId, source: SourceId) -> Result<RetainStatus>;
-
-pub struct RetainStatus {
-  pub state: RetainState,
-  pub chunks_total: usize, pub chunks_pending: usize, pub chunks_extracting: usize,
-  pub chunks_done: usize, pub chunks_failed: usize, pub facts_written: usize }
+impl MemoryBank {
+  pub fn new(store:Arc<dyn Store>, clock:Arc<dyn Clock>, cfg:RetainConfig) -> Self;
+  pub async fn retain(&self, bank:BankId, payload:RawPayload) -> Result<SourceId>;
+  pub async fn retain_status(&self, bank:BankId, source:SourceId) -> Result<RetainStatus>;
+}
+pub struct RetainConfig { pub chunk: ChunkConfig, pub stale_after: Duration } // 10 min
+pub struct RetainStatus { pub state: RetainState, pub chunks_total/pending/extracting/done/failed: usize,
+                          pub facts_written: usize }
 pub enum RetainState { Received, Queued, Running, Stalled, Completed,
                        CompletedWithFailures, Failed }
 ```
-- **Semantics**: `retain` normalizes → tx0 (source `received`) → chunking (spans still in memory) → tx1 (chunks `pending`, source `chunked`) → returns `SourceId`. Ack means "durably queued", not "done": model work starts only in the worker. Errors before the ack are returned directly; failures after it surface through `retain_status` (`CompletedWithFailures` / `Failed`).
-- **Status derivation** (no progress table, no new column): aggregate `chunk` rows by `source_id`; `Stalled` = an `extracting` row with `now - updated_at > stale_after`; `total = 0` (all hashes collided) counts as `Completed`; unknown source → `NotFound`.
-- **Store support**: `Store::source_progress(bank, source)` returning the counts (`None` when unknown) + migration `0002` adding `chunk(bank_id, source_id)` for the aggregation.
-- **Acceptance**: `retain` returns with `source.status=chunked` and all chunk rows visible but zero facts; `retain_status` matches chunk states at every boundary; without a worker the state stays `Queued/Running` until `rescan`; re-ingest of identical material yields a zero-chunk source in `Completed`.
-- **Tests**: ack point (source+chunks exist, no facts); status transitions with `FixedClock`; zero-chunk source; unknown source; `CompletedWithFailures` after a dead-letter chunk.
+  `retain` normalizes → tx0 (`source.received`) → chunks (spans still in memory) → tx1
+  (`append_chunks` + `source.chunked`) → returns `SourceId`. The ack means "durably queued";
+  no model call runs before it. An empty chunk batch still flips the source to `chunked`.
+- **Status derivation** (no progress table, no new column): `Store::source_progress` aggregates
+  `chunk` rows by `(bank_id, source_id)` and counts committed facts. `Received` when the source
+  is `received` with zero chunks; total=0 on a `chunked` source (all hashes collided) →
+  `Completed`; an `extracting` row older than `stale_after` → `Stalled`; otherwise extracting →
+  `Running`, pending → `Queued`, all done → `Completed`, all failed → `Failed`, mixed done +
+  failed → `CompletedWithFailures`. Unknown source → `NotFound`.
+- **Index**: `chunk(bank_id, source_id)` is part of the initial migration.
+- **Acceptance**: `retain` returns with `source.status=chunked` and all chunk rows visible but
+  zero facts; `retain_status` matches chunk states at every boundary; without a worker the state
+  stays `Queued/Running`; re-ingest of identical material yields a zero-chunk source in
+  `Completed`.
+- **Tests**: ack point (source + chunks, no facts); claim → `Running`; stale claim → `Stalled`;
+  done → `Completed`; zero-chunk re-ingest; unknown source; `Received`; mixed done/failed →
+  `CompletedWithFailures`; all failed → `Failed`; `facts_written` count.
 
 ## P1-18 worker + rescan
 
 **Status**: ❌
 
 - **Content**: background processing driven by derived work lists.
+- **Dependency upgrade (prerequisite)**: move to sqlx 0.9 together with this task — bump `rust-toolchain.toml` to 1.94, `libsqlite3-sys` to 0.37 (sqlite-vec FFI), adapt to `SqlSafeStr` / migrator / extension-loading changes, and keep tests, clippy, and docs green.
 - **Design**:
 ```rust
 pub struct WorkerConfig { pub concurrency: usize, pub poll_interval: Duration,

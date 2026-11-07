@@ -1,4 +1,4 @@
-//! P1-13: semantic link construction against a real store.
+//! Semantic link construction against a real store.
 
 use engine::link::{LinkConfig, build_semantic_links};
 use engine::ports::{NewLink, Store};

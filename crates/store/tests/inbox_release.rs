@@ -1,4 +1,4 @@
-//! P1-6: `release_chunk` — failed claims return to `pending`, idempotently.
+//! `release_chunk`: failed claims return to `pending`, idempotently.
 
 use std::time::Duration;
 

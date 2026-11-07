@@ -1,7 +1,7 @@
 //! Extraction call: A.1 prompt + JSON Schema + per-fact validation.
 //!
 //! Model calls happen outside any transaction; this module only produces
-//! proposals. Persistence is the caller's job (P1-16).
+//! proposals. Persistence is the caller's job (the chunk commit).
 
 use schemars::schema_for;
 use tracing::warn;

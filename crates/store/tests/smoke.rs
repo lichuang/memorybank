@@ -1,9 +1,9 @@
-//! P0 smoke test: the migrated schema supports the inbox flow end to end
+//! Schema smoke test: the migrated schema supports the inbox flow end to end
 //! (bank → source → chunks → claim → release) plus the single-chunk transaction
 //! boundary.
 //!
-//! P0 has no `Store` implementation yet (that lands with P1-3/P1-4), so this
-//! exercises the same operations with runtime SQL. It de-risks the adapter work:
+//! The store implementation is wired incrementally, so this exercises the same
+//! operations with runtime SQL. It de-risks the adapter work:
 //! atomic claim, stale reclaim, release, and rollback semantics are proven
 //! against the real schema.
 

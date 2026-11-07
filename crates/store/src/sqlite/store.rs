@@ -11,12 +11,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use engine::ports::{
   ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NewChunk, NewEntity,
-  NewObservation, NewOpinion, Store, WorkLists,
+  NewObservation, NewOpinion, SourceProgress, Store, WorkLists,
 };
 use engine::types::{
   Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, Entity, EntityId, EntityKind, Fact,
-  FactId, FactType, OccurrenceInterval, Source, SourceId, TimeRange, Timestamp, from_epoch_millis,
-  to_epoch_millis,
+  FactId, FactType, OccurrenceInterval, Source, SourceId, SourceStatus, TimeRange, Timestamp,
+  from_epoch_millis, to_epoch_millis,
 };
 use engine::{Error, Result};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
@@ -134,8 +134,6 @@ impl Store for SqliteStore {
 
     Ok(())
   }
-
-  // —— Not implemented yet (P1-4 onward) ——
 
   async fn append_chunks(&self, source: SourceId, chunks: Vec<NewChunk>) -> Result<usize> {
     if chunks.iter().any(|chunk| chunk.source_id != source) {
@@ -631,6 +629,66 @@ impl Store for SqliteStore {
     Err(not_implemented("pending_work"))
   }
 
+  async fn source_progress(
+    &self,
+    bank: BankId,
+    source: SourceId,
+  ) -> Result<Option<SourceProgress>> {
+    // One statement: SQLite gives statement-level snapshot consistency, so the
+    // source status, chunk counts, and fact count cannot straddle a concurrent
+    // claim/commit.
+    let row: Option<(String, i64, i64, i64, i64, i64, Option<i64>, i64)> = sqlx::query_as(
+      "WITH c AS ( \
+         SELECT \
+           COUNT(*) AS total, \
+           COUNT(*) FILTER (WHERE status = 'pending') AS pending, \
+           COUNT(*) FILTER (WHERE status = 'extracting') AS extracting, \
+           COUNT(*) FILTER (WHERE status = 'done') AS done, \
+           COUNT(*) FILTER (WHERE status = 'failed') AS failed, \
+           MIN(CASE WHEN status = 'extracting' THEN updated_at END) AS oldest_extracting \
+         FROM chunk WHERE bank_id = ? AND source_id = ? \
+       ) \
+       SELECT s.status, c.total, c.pending, c.extracting, c.done, c.failed, \
+              c.oldest_extracting, \
+              (SELECT COUNT(*) FROM fact f JOIN chunk ch ON ch.id = f.chunk_id \
+               WHERE ch.bank_id = ? AND ch.source_id = ?) AS facts_written \
+       FROM source s CROSS JOIN c \
+       WHERE s.bank_id = ? AND s.id = ?",
+    )
+    .bind(bank.to_string())
+    .bind(source.to_string())
+    .bind(bank.to_string())
+    .bind(source.to_string())
+    .bind(bank.to_string())
+    .bind(source.to_string())
+    .fetch_optional(&self.pool)
+    .await
+    .map_err(|error| map_read("source", error))?;
+
+    let Some((status, total, pending, extracting, done, failed, oldest_extracting, facts)) = row
+    else {
+      return Ok(None);
+    };
+
+    let source_status = status
+      .parse::<SourceStatus>()
+      .map_err(|error| Error::fatal(error.to_string()))?;
+    let to_usize = |value: i64, field: &'static str| {
+      usize::try_from(value).map_err(|_| Error::fatal(format!("corrupt {field} `{value}`")))
+    };
+
+    Ok(Some(SourceProgress {
+      source_status,
+      chunks_total: to_usize(total, "chunk total")?,
+      chunks_pending: to_usize(pending, "pending chunks")?,
+      chunks_extracting: to_usize(extracting, "extracting chunks")?,
+      chunks_done: to_usize(done, "done chunks")?,
+      chunks_failed: to_usize(failed, "failed chunks")?,
+      oldest_extracting_at: oldest_extracting.map(timestamp).transpose()?,
+      facts_written: to_usize(facts, "fact count")?,
+    }))
+  }
+
   async fn update_embeddings(&self, _embeddings: &[(FactId, Vec<f32>)]) -> Result<usize> {
     Err(not_implemented("update_embeddings"))
   }
@@ -877,7 +935,7 @@ async fn commit_chunk_tx(tx: &mut Transaction<'_, Sqlite>, commit: &ChunkCommit)
 /// means the commit references an entity outside the chunk's bank; that is
 /// corrupt input, not a retryable condition.
 //
-// Called by `commit_chunk` (P1-16) after the binding rows are written.
+// Called by `commit_chunk` after the binding rows are written.
 async fn apply_entity_stats(
   tx: &mut Transaction<'_, Sqlite>,
   bank: BankId,

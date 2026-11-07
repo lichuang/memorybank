@@ -21,6 +21,6 @@ pub use reranker::Reranker;
 pub use store::{
   ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NeighborKind, NewBinding,
   NewChunk, NewEntity, NewFact, NewLink, NewObservation, NewOpinion, OpinionConfidenceUpdate,
-  Store, WorkLists,
+  SourceProgress, Store, WorkLists,
 };
 pub use temporal::TemporalParser;

@@ -1,4 +1,4 @@
-//! P1-12 support: occurrence-interval and fact read queries.
+//! Occurrence-interval and fact read queries.
 
 use engine::ports::Store;
 use engine::testing::timestamp;

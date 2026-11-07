@@ -1,4 +1,4 @@
-//! Token estimation shared by chunking (P1-2) and budget packing (P2-7).
+//! Token estimation shared by chunking and budget packing.
 
 /// Estimates the token count of a text.
 ///

@@ -1,4 +1,4 @@
-//! P1-13: vector search through the schema-managed sqlite-vec index.
+//! Vector search through the schema-managed sqlite-vec index.
 
 use engine::ports::Store;
 use engine::types::{BankId, FactId};

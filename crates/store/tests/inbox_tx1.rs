@@ -1,4 +1,4 @@
-//! P1-4: tx1 (`append_chunks`) — conflict skipping and status advance.
+//! tx1 (`append_chunks`): conflict skipping and status advance.
 
 use engine::Error;
 use engine::ports::{NewChunk, Store};
