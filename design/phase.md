@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 16/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (28/67 total)**
+> Current progress: **P0 12/12 · P1 17/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (29/67 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -198,7 +198,7 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
   async fn create_source(&self, source:Source)->Result<()>;
   async fn append_chunks(&self, src:SourceId, chunks:Vec<NewChunk>)->Result<usize>;  // inserted count
   async fn claim_chunk(&self, bank:BankId, now:Timestamp, stale_after:Duration)->Result<Option<ClaimedChunk>>;
-  async fn release_chunk(&self, chunk:ChunkId, now:Timestamp)->Result<()>;   // extracting→pending; idempotent otherwise
+  async fn release_chunk(&self, chunk:ChunkId, claimed_at:Timestamp, now:Timestamp)->Result<()>;  // token-guarded; pending/done/failed are no-ops
   async fn commit_chunk(&self, c:ChunkCommit)->Result<()>;
   // retrieval
   async fn search_vector(&self, bank:BankId, q:&[f32], k:usize)->Result<Vec<(FactId,f32)>>;
@@ -376,7 +376,7 @@ RETURNING *;
 **Status**: ✅ (2026-10-29)
 
 - **Content**: return a failed claim to `pending`.
-- **Design**: `release_chunk(chunk, now)`; `UPDATE chunk SET status='pending', updated_at=? WHERE id=? AND status='extracting'` (clock injected). Rows affected 1 → released. Rows affected 0 → idempotent `Ok` when the row exists (already pending / done / failed are never resurrected), `NotFound` when it does not.
+- **Design**: `release_chunk(chunk, claimed_at, now)`; `UPDATE chunk SET status='pending', updated_at=? WHERE id=? AND status='extracting' AND updated_at=?claimed_at` (clock injected). 1 row → released. 0 rows → `Ok` when the row is already `pending` / `done` / `failed` (never resurrected); `Conflict` when it is still `extracting` with a different token (the claim was stolen); `NotFound` when missing.
 - **Acceptance**: status=pending, updated_at refreshed; repeated failures keep the semantics; a second release is a no-op; `done` / `failed` rows stay untouched.
 - **Tests**: after release the chunk can be claimed again; repeated release; done/failed untouched; missing chunk → `NotFound`.
 
@@ -646,7 +646,7 @@ pub enum RetainState { Received, Queued, Running, Stalled, Completed,
 
 ## P1-18 worker + rescan
 
-**Status**: ❌
+**Status**: ✅ (2026-11-07)
 
 - **Content**: background processing driven by derived work lists.
 - **Dependency upgrade (prerequisite)**: ✅ (2026-11-07) sqlx 0.9, Rust 1.94, `libsqlite3-sys` 0.37; adapted the test SQL helper to `SqlSafeStr`; tests, clippy, and docs green.
@@ -654,16 +654,36 @@ pub enum RetainState { Received, Queued, Running, Stalled, Completed,
 ```rust
 pub struct WorkerConfig { pub concurrency: usize, pub poll_interval: Duration,
   pub stale_after: Duration, pub max_attempts: u32, pub retry_delay: Duration }
+pub struct PipelineConfig { pub extraction: ExtractionConfig, pub links: LinkConfig,
+  pub resolve: ResolveWeights, pub embedding_batch: usize }
 impl MemoryBank {
+  pub fn with_models(llm: Arc<dyn Llm>, embedder: Arc<dyn Embedder>) -> Self;
+  pub fn with_pipeline(cfg: PipelineConfig) -> Self;
+  pub fn with_worker_config(cfg: WorkerConfig) -> Self;
   pub fn spawn_worker(&self, cfg: WorkerConfig) -> JoinHandle<()>;   // rescan loop + sleep
   pub async fn rescan(&self, bank: BankId) -> Result<RescanReport>;  // one deterministic pass
 }
 pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usize,
                           pub failed: usize }
 ```
-- **Semantics**: `retain` sends a best-effort wake-up to a running worker; the periodic `poll_interval` sweep makes a lost notification harmless (converges after a crash). `rescan` is a single pass and is what tests call to avoid sleeps. `failed` chunks are not retried automatically (ops reset).
-- **Acceptance**: after `retain` + one `rescan` pass every chunk reaches `done`; stale `extracting` rows are reclaimed; `failed` rows stay put; a worker started with a long interval still converges via the periodic sweep.
-- **Tests**: simulate interruption by setting statuses manually, then one rescan converges; worker loop drains a queued source without manual rescan.
+  `rescan` reads `pending_work`, re-chunks `received` sources from `payload_text` (window
+  fallback; spans are not persisted), then loops `claim_chunk` over pending/stale rows. Each
+  chunk runs `extract_facts → resolve → embed_facts → temporal/semantic links → causal_links →
+  commit_chunk` (opinion updates stay empty while P1-15 is on hold). Failures return the chunk
+  to `pending`; attempts are counted in memory and, at `max_attempts`, the chunk is
+  dead-lettered via `fail_chunk`. A `Conflict` from the claim-token CAS means another worker
+  owns the chunk and is left untouched. `concurrency` is reserved (the pass is sequential);
+  `retry_delay` only backs off the spawned loop, so `rescan` stays sleep-free and deterministic.
+  `retain` sends a best-effort `Notify` wake-up; the periodic sweep covers lost notifications.
+- **Store additions**: `list_banks`, `load_source`, `fail_chunk`, `fetch_entities`, plus the
+  derived `pending_work` implementation (missing embeddings = facts without a `fact_vec` row).
+- **Acceptance**: after `retain` + one `rescan` pass every chunk reaches `done`; stale
+  `extracting` rows are reclaimed; `failed` rows stay put; a worker started with a long
+  interval still converges via the periodic sweep.
+- **Tests**: retain + rescan produces facts, vectors, bindings, statistics, and FTS rows;
+  failed extraction is dead-lettered and not retried; stale claims are reclaimed; `received`
+  sources are re-chunked; the spawned worker drains a queued source; missing models surface as
+  failed chunks.
 
 ## P1-19 retain Integration Tests
 

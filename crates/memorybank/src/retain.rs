@@ -3,11 +3,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::ports::{Clock, NewChunk, SourceProgress, Store, now_ts};
+use engine::ports::{Clock, Embedder, Llm, NewChunk, SourceProgress, Store, now_ts};
 use engine::retain::{ChunkConfig, RawPayload, chunk, normalize};
 use engine::tokens::CharHeuristic;
 use engine::types::{BankId, ChunkId, Source, SourceId, SourceStatus};
 use engine::{Error, Result};
+use tokio::sync::Notify;
+
+use crate::worker::{PipelineConfig, WorkerConfig};
 
 /// Retain settings. Runtime configuration — never persisted.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,9 +71,14 @@ pub struct RetainStatus {
 /// Facade over a [`Store`] and a [`Clock`].
 #[derive(Clone)]
 pub struct MemoryBank {
-  store: Arc<dyn Store>,
-  clock: Arc<dyn Clock>,
-  config: RetainConfig,
+  pub(crate) store: Arc<dyn Store>,
+  pub(crate) clock: Arc<dyn Clock>,
+  pub(crate) config: RetainConfig,
+  pub(crate) llm: Option<Arc<dyn Llm>>,
+  pub(crate) embedder: Option<Arc<dyn Embedder>>,
+  pub(crate) pipeline: PipelineConfig,
+  pub(crate) worker: WorkerConfig,
+  pub(crate) notify: Arc<Notify>,
 }
 
 impl MemoryBank {
@@ -80,7 +88,31 @@ impl MemoryBank {
       store,
       clock,
       config,
+      llm: None,
+      embedder: None,
+      pipeline: PipelineConfig::default(),
+      worker: WorkerConfig::default(),
+      notify: Arc::new(Notify::new()),
     }
+  }
+
+  /// Adds the model ports used by the extraction worker.
+  pub fn with_models(mut self, llm: Arc<dyn Llm>, embedder: Arc<dyn Embedder>) -> Self {
+    self.llm = Some(llm);
+    self.embedder = Some(embedder);
+    self
+  }
+
+  /// Overrides the extraction/linking/embedding configuration.
+  pub fn with_pipeline(mut self, pipeline: PipelineConfig) -> Self {
+    self.pipeline = pipeline;
+    self
+  }
+
+  /// Sets the worker configuration used by [`MemoryBank::rescan`].
+  pub fn with_worker_config(mut self, worker: WorkerConfig) -> Self {
+    self.worker = worker;
+    self
   }
 
   /// Ingests a payload (async ack).
@@ -127,6 +159,9 @@ impl MemoryBank {
     // An empty batch still flips the source to `chunked` (all hashes collided
     // or the payload produced no chunks).
     self.store.append_chunks(source_id, chunks).await?;
+
+    // Best-effort wake-up; the worker's periodic sweep covers a lost notification.
+    self.notify.notify_one();
 
     Ok(source_id)
   }

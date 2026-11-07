@@ -31,8 +31,14 @@ pub trait Store: Send + Sync {
   /// Loads a bank by id. Returns [`crate::Error::NotFound`] when absent.
   async fn load_bank(&self, id: BankId) -> Result<Bank>;
 
+  /// Lists every bank id (worker bank discovery).
+  async fn list_banks(&self) -> Result<Vec<BankId>>;
+
   /// Persists a source row (tx0 of the inbox model).
   async fn create_source(&self, source: Source) -> Result<()>;
+
+  /// Loads a source by id; `NotFound` when absent.
+  async fn load_source(&self, bank: BankId, source: SourceId) -> Result<Source>;
 
   /// Persists chunk rows for a source (tx1), skipping any whose
   /// `(bank_id, content_hash)` already exists, and advances the source to
@@ -57,10 +63,22 @@ pub trait Store: Send + Sync {
   /// Returns a claimed chunk to `pending` after a failed extraction, refreshing
   /// `updated_at = now`.
   ///
-  /// Idempotent: a row that is already `pending`, `done`, or `failed` is left
-  /// untouched and reported as success; only a missing row yields
-  /// [`crate::Error::NotFound`].
-  async fn release_chunk(&self, chunk: ChunkId, now: Timestamp) -> Result<()>;
+  /// The transition is conditional on `claimed_at` (the token written by
+  /// [`Store::claim_chunk`]): a row that is already `pending`, `done`, or
+  /// `failed` is left untouched and reported as success; a row that is still
+  /// `extracting` with a different token is a [`crate::Error::Conflict`] (the
+  /// claim was stolen); a missing row is [`crate::Error::NotFound`].
+  async fn release_chunk(
+    &self,
+    chunk: ChunkId,
+    claimed_at: Timestamp,
+    now: Timestamp,
+  ) -> Result<()>;
+
+  /// Dead-letters a claimed chunk (`extracting → failed`), conditional on the
+  /// claim token. Any other status, or a stale token, is a
+  /// [`crate::Error::Conflict`]: the worker no longer owns it.
+  async fn fail_chunk(&self, chunk: ChunkId, claimed_at: Timestamp, now: Timestamp) -> Result<()>;
 
   /// The only transaction entry for extraction products (tx2): facts, entity
   /// bindings, links, entity statistics, and opinion updates are written
@@ -114,6 +132,9 @@ pub trait Store: Send + Sync {
   /// row was created.
   async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)>;
 
+  /// Loads entities by id; unknown ids are omitted.
+  async fn fetch_entities(&self, ids: &[EntityId]) -> Result<Vec<Entity>>;
+
   /// Candidate entities for a mention: exact-name hits, entities with a matching
   /// `mention_text` variant, and the bank's top `limit` entities by
   /// `mention_count` (so fuzzy scoring has a bounded shortlist).
@@ -141,7 +162,8 @@ pub trait Store: Send + Sync {
 
   /// Derived work lists (no task-queue table): sources awaiting chunking,
   /// pending chunks, stale claims, facts missing embeddings, and entities whose
-  /// evidence changed since their latest observation batch.
+  /// evidence changed since their latest observation batch. All lists are read
+  /// from one snapshot.
   async fn pending_work(
     &self,
     bank: BankId,
@@ -465,8 +487,14 @@ mod tests {
     async fn load_bank(&self, id: BankId) -> Result<Bank> {
       Err(crate::Error::not_found("bank", id.to_string()))
     }
+    async fn list_banks(&self) -> Result<Vec<BankId>> {
+      unreachable!("stub")
+    }
     async fn create_source(&self, _source: Source) -> Result<()> {
       unreachable!("stub")
+    }
+    async fn load_source(&self, _bank: BankId, source: SourceId) -> Result<Source> {
+      Err(crate::Error::not_found("source", source.to_string()))
     }
     async fn append_chunks(&self, _source: SourceId, _chunks: Vec<NewChunk>) -> Result<usize> {
       unreachable!("stub")
@@ -479,7 +507,20 @@ mod tests {
     ) -> Result<Option<ClaimedChunk>> {
       unreachable!("stub")
     }
-    async fn release_chunk(&self, _chunk: ChunkId, _now: Timestamp) -> Result<()> {
+    async fn release_chunk(
+      &self,
+      _chunk: ChunkId,
+      _claimed_at: Timestamp,
+      _now: Timestamp,
+    ) -> Result<()> {
+      unreachable!("stub")
+    }
+    async fn fail_chunk(
+      &self,
+      _chunk: ChunkId,
+      _claimed_at: Timestamp,
+      _now: Timestamp,
+    ) -> Result<()> {
       unreachable!("stub")
     }
     async fn commit_chunk(&self, _commit: ChunkCommit) -> Result<()> {
@@ -518,6 +559,9 @@ mod tests {
       unreachable!("stub")
     }
     async fn ensure_entity(&self, _new: NewEntity) -> Result<(EntityId, bool)> {
+      unreachable!("stub")
+    }
+    async fn fetch_entities(&self, _ids: &[EntityId]) -> Result<Vec<Entity>> {
       unreachable!("stub")
     }
     async fn entity_candidates(

@@ -116,6 +116,20 @@ impl Store for SqliteStore {
     })
   }
 
+  async fn list_banks(&self) -> Result<Vec<BankId>> {
+    let rows: Vec<String> = sqlx::query_scalar("SELECT id FROM bank ORDER BY id")
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("bank", error))?;
+
+    rows
+      .into_iter()
+      .map(|id| {
+        BankId::parse(&id).map_err(|error| Error::fatal(format!("corrupt bank id `{id}`: {error}")))
+      })
+      .collect()
+  }
+
   async fn create_source(&self, source: Source) -> Result<()> {
     sqlx::query(
       "INSERT INTO source (id, bank_id, title, payload_text, status, created_at, updated_at) \
@@ -133,6 +147,37 @@ impl Store for SqliteStore {
     .map_err(|error| map_write("source", error))?;
 
     Ok(())
+  }
+
+  async fn load_source(&self, bank: BankId, source: SourceId) -> Result<Source> {
+    type Row = (String, String, Option<String>, String, String, i64, i64);
+
+    let row = sqlx::query_as::<_, Row>(
+      "SELECT id, bank_id, title, payload_text, status, created_at, updated_at \
+       FROM source WHERE bank_id = ? AND id = ?",
+    )
+    .bind(bank.to_string())
+    .bind(source.to_string())
+    .fetch_optional(&self.pool)
+    .await
+    .map_err(|error| map_read("source", error))?
+    .ok_or_else(|| Error::not_found("source", source.to_string()))?;
+
+    let (id, bank_id, title, payload_text, status, created_at, updated_at) = row;
+
+    Ok(Source {
+      id: SourceId::parse(&id)
+        .map_err(|error| Error::fatal(format!("corrupt source id `{id}`: {error}")))?,
+      bank_id: BankId::parse(&bank_id)
+        .map_err(|error| Error::fatal(format!("corrupt bank id `{bank_id}`: {error}")))?,
+      title,
+      payload_text,
+      status: status
+        .parse::<SourceStatus>()
+        .map_err(|error| Error::fatal(error.to_string()))?,
+      created_at: timestamp(created_at)?,
+      updated_at: timestamp(updated_at)?,
+    })
   }
 
   async fn append_chunks(&self, source: SourceId, chunks: Vec<NewChunk>) -> Result<usize> {
@@ -246,12 +291,19 @@ impl Store for SqliteStore {
       .map(|claimed| claimed.map(|chunk| ClaimedChunk { chunk }))
   }
 
-  async fn release_chunk(&self, chunk: ChunkId, now: Timestamp) -> Result<()> {
+  async fn release_chunk(
+    &self,
+    chunk: ChunkId,
+    claimed_at: Timestamp,
+    now: Timestamp,
+  ) -> Result<()> {
     let released = sqlx::query(
-      "UPDATE chunk SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'extracting'",
+      "UPDATE chunk SET status = 'pending', updated_at = ? \
+       WHERE id = ? AND status = 'extracting' AND updated_at = ?",
     )
     .bind(to_epoch_millis(now))
     .bind(chunk.to_string())
+    .bind(to_epoch_millis(claimed_at))
     .execute(&self.pool)
     .await
     .map_err(|error| map_write("chunk", error))?;
@@ -260,16 +312,52 @@ impl Store for SqliteStore {
       return Ok(());
     }
 
-    // Nothing was updated: either the row is gone, or it is not `extracting`
-    // (already released, done, or dead-lettered). Never resurrect those states.
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM chunk WHERE id = ?")
+    // Nothing was updated: the row is gone, its claim token changed, or it is
+    // no longer `extracting`. Never resurrect done/failed rows.
+    let row: Option<(String, i64)> =
+      sqlx::query_as("SELECT status, updated_at FROM chunk WHERE id = ?")
+        .bind(chunk.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| map_read("chunk", error))?;
+
+    match row {
+      None => Err(Error::not_found("chunk", chunk.to_string())),
+      Some((status, _)) if status == "extracting" => Err(Error::conflict(
+        "chunk",
+        format!("claim token for chunk {chunk} is no longer valid"),
+      )),
+      Some(_) => Ok(()),
+    }
+  }
+
+  async fn fail_chunk(&self, chunk: ChunkId, claimed_at: Timestamp, now: Timestamp) -> Result<()> {
+    let failed = sqlx::query(
+      "UPDATE chunk SET status = 'failed', updated_at = ? \
+       WHERE id = ? AND status = 'extracting' AND updated_at = ?",
+    )
+    .bind(to_epoch_millis(now))
+    .bind(chunk.to_string())
+    .bind(to_epoch_millis(claimed_at))
+    .execute(&self.pool)
+    .await
+    .map_err(|error| map_write("chunk", error))?;
+
+    if failed.rows_affected() > 0 {
+      return Ok(());
+    }
+
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM chunk WHERE id = ?")
       .bind(chunk.to_string())
       .fetch_optional(&self.pool)
       .await
       .map_err(|error| map_read("chunk", error))?;
 
-    match status {
-      Some(_) => Ok(()),
+    match exists {
+      Some(_) => Err(Error::conflict(
+        "chunk",
+        format!("chunk {chunk} is not extracting or its claim token is stale"),
+      )),
       None => Err(Error::not_found("chunk", chunk.to_string())),
     }
   }
@@ -469,6 +557,30 @@ impl Store for SqliteStore {
     }
   }
 
+  async fn fetch_entities(&self, ids: &[EntityId]) -> Result<Vec<Entity>> {
+    if ids.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let mut query = QueryBuilder::<Sqlite>::new(
+      "SELECT id, bank_id, canonical_name, entity_type, mention_count, first_seen, last_seen, \
+              attrs, created_at, updated_at FROM entity WHERE id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for id in ids {
+      separated.push_bind(id.to_string());
+    }
+    query.push(")");
+
+    let rows: Vec<EntityRow> = query
+      .build_query_as()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("entity", error))?;
+
+    rows.into_iter().map(entity_from_row).collect()
+  }
+
   async fn entity_candidates(
     &self,
     bank: BankId,
@@ -622,11 +734,108 @@ impl Store for SqliteStore {
 
   async fn pending_work(
     &self,
-    _bank: BankId,
-    _now: Timestamp,
-    _stale_after: Duration,
+    bank: BankId,
+    now: Timestamp,
+    stale_after: Duration,
   ) -> Result<WorkLists> {
-    Err(not_implemented("pending_work"))
+    // One read transaction: all five work lists come from the same snapshot.
+    let mut tx = self
+      .pool
+      .begin()
+      .await
+      .map_err(|error| map_write("pending work", error))?;
+    let source_rows: Vec<String> = sqlx::query_scalar(
+      "SELECT id FROM source WHERE bank_id = ? AND status = 'received' ORDER BY id",
+    )
+    .bind(bank.to_string())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| map_read("source", error))?;
+
+    let pending_rows: Vec<String> = sqlx::query_scalar(
+      "SELECT id FROM chunk WHERE bank_id = ? AND status = 'pending' ORDER BY id",
+    )
+    .bind(bank.to_string())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| map_read("chunk", error))?;
+
+    let cutoff = to_epoch_millis(now).saturating_sub(duration_millis(stale_after));
+    let stale_rows: Vec<String> = sqlx::query_scalar(
+      "SELECT id FROM chunk \
+       WHERE bank_id = ? AND status = 'extracting' AND updated_at < ? ORDER BY id",
+    )
+    .bind(bank.to_string())
+    .bind(cutoff)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| map_read("chunk", error))?;
+
+    let missing_embedding_rows: Vec<String> = sqlx::query_scalar(
+      "SELECT f.id FROM fact f LEFT JOIN fact_vec v ON v.rowid = f.rowid \
+       WHERE f.bank_id = ? AND v.rowid IS NULL ORDER BY f.id",
+    )
+    .bind(bank.to_string())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| map_read("fact", error))?;
+
+    let stale_entity_rows: Vec<String> = sqlx::query_scalar(
+      "SELECT e.id FROM entity e \
+       WHERE e.bank_id = ? AND e.last_seen IS NOT NULL \
+         AND e.last_seen > COALESCE(( \
+           SELECT MAX(f.created_at) FROM fact f \
+           JOIN fact_entity fe ON fe.fact_id = f.id \
+           WHERE f.bank_id = e.bank_id AND fe.entity_id = e.id \
+             AND f.fact_type = 'observation'), 0) \
+       ORDER BY e.id",
+    )
+    .bind(bank.to_string())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| map_read("entity", error))?;
+
+    tx.commit()
+      .await
+      .map_err(|error| map_write("pending work", error))?;
+
+    Ok(WorkLists {
+      sources_received: source_rows
+        .into_iter()
+        .map(|id| {
+          SourceId::parse(&id)
+            .map_err(|error| Error::fatal(format!("corrupt source id `{id}`: {error}")))
+        })
+        .collect::<Result<_>>()?,
+      chunks_pending: pending_rows
+        .into_iter()
+        .map(|id| {
+          ChunkId::parse(&id)
+            .map_err(|error| Error::fatal(format!("corrupt chunk id `{id}`: {error}")))
+        })
+        .collect::<Result<_>>()?,
+      chunks_stale: stale_rows
+        .into_iter()
+        .map(|id| {
+          ChunkId::parse(&id)
+            .map_err(|error| Error::fatal(format!("corrupt chunk id `{id}`: {error}")))
+        })
+        .collect::<Result<_>>()?,
+      facts_missing_embedding: missing_embedding_rows
+        .into_iter()
+        .map(|id| {
+          FactId::parse(&id)
+            .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))
+        })
+        .collect::<Result<_>>()?,
+      entities_stale_observation: stale_entity_rows
+        .into_iter()
+        .map(|id| {
+          EntityId::parse(&id)
+            .map_err(|error| Error::fatal(format!("corrupt entity id `{id}`: {error}")))
+        })
+        .collect::<Result<_>>()?,
+    })
   }
 
   async fn source_progress(

@@ -10,12 +10,14 @@ description = "Agent memory system based on the Hindsight paper (retain, recall,
 engine.workspace = true
 store.workspace = true
 llm.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+serde_json.workspace = true
 sqlx = { version = "0.9", default-features = false, features = [
   "sqlite",
   "runtime-tokio",

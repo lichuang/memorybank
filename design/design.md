@@ -108,11 +108,14 @@ pub trait Store: Send + Sync {
     // —— Bank & inbox (schema §5.1, four stages) ——
     async fn create_bank(&self, bank: Bank) -> Result<()>;
     async fn load_bank(&self, id: BankId) -> Result<Bank>;
+    async fn list_banks(&self) -> Result<Vec<BankId>>;                                        // worker bank discovery
     async fn create_source(&self, source: Source) -> Result<()>;                            // tx0
+    async fn load_source(&self, bank: BankId, source: SourceId) -> Result<Source>;
     async fn append_chunks(&self, src: SourceId, chunks: Vec<NewChunk>) -> Result<usize>;    // tx1; hash conflicts skipped
     async fn claim_chunk(&self, bank: BankId, now: Timestamp, stale_after: Duration)
         -> Result<Option<ClaimedChunk>>;                                                     // atomic pending→extracting claim
-    async fn release_chunk(&self, chunk: ChunkId, now: Timestamp) -> Result<()>;              // on failure: back to pending (idempotent)
+    async fn release_chunk(&self, chunk: ChunkId, claimed_at: Timestamp, now: Timestamp) -> Result<()>;  // token-guarded; pending idempotent
+    async fn fail_chunk(&self, chunk: ChunkId, claimed_at: Timestamp, now: Timestamp) -> Result<()>;    // token-guarded dead letter
     async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;                         // tx2: all products + status=done atomically
 
     // —— Read path (schema §5.4, four channels) ——
@@ -125,11 +128,13 @@ pub trait Store: Send + Sync {
 
     // —— Entity / opinion / observation / maintenance ——
     async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)>;               // (id, created); UNIQUE conflict reuses
+    async fn fetch_entities(&self, ids: &[EntityId]) -> Result<Vec<Entity>>;
     async fn entity_candidates(&self, bank: BankId, mention: &str, limit: usize) -> Result<Vec<EntityCandidate>>;
     async fn insert_opinion(&self, op: NewOpinion) -> Result<()>;
     async fn insert_observations(&self, obs: Vec<NewObservation>) -> Result<()>;
     async fn observations_of(&self, bank: BankId, entity: EntityId, limit: usize) -> Result<Vec<Fact>>;
     async fn pending_work(&self, bank: BankId, now: Timestamp, stale_after: Duration) -> Result<WorkLists>;
+    async fn source_progress(&self, bank: BankId, source: SourceId) -> Result<Option<SourceProgress>>;
     async fn update_embeddings(&self, embeddings: &[(FactId, Vec<f32>)]) -> Result<usize>;  // backfill write path
     async fn gc_observations(&self, bank: BankId, now: Timestamp, max_age: Duration,
                              per_entity_cap: usize) -> Result<usize>;
@@ -151,7 +156,7 @@ Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 - Capability boundaries (read / write / maintenance) are *behavioral*, not *structural*: the same adapter owns the tables, and splitting would hand the engine two or three handles to the same connection pool without buying isolation.
 - The composition would be a supertrait (`trait Store: StoreRead + StoreWrite + StoreMaintenance`) if it ever happens, so call sites typed as `&dyn Store` survive the split unchanged.
 
-**Split trigger (recorded, not planned):** split when a consumer genuinely needs only a subset — e.g. a read-only serving replica (`search_*` / `fetch_facts` only), a maintenance worker running with narrower credentials (`pending_work` / `update_embeddings` / `gc_observations`), or a third-party adapter that can implement retrieval but not ingestion. The cut is then `StoreRead` (`load_bank`, `search_vector`, `search_bm25`, `neighbors`, `facts_in_range`, `fetch_facts`, `observations_of`, `entity_candidates`) / `StoreWrite` (`create_bank`, `create_source`, `append_chunks`, `claim_chunk`, `release_chunk`, `commit_chunk`, `ensure_entity`, `insert_opinion`, `insert_observations`, `update_embeddings`, `increment_access`) / `StoreMaintenance` (`pending_work`, `gc_observations`), with `commit_chunk` remaining the only transaction entry.
+**Split trigger (recorded, not planned):** split when a consumer genuinely needs only a subset — e.g. a read-only serving replica (`search_*` / `fetch_facts` only), a maintenance worker running with narrower credentials (`pending_work` / `update_embeddings` / `gc_observations`), or a third-party adapter that can implement retrieval but not ingestion. The cut is then `StoreRead` (`load_bank`, `list_banks`, `load_source`, `search_vector`, `search_bm25`, `neighbors`, `facts_in_range`, `fetch_facts`, `observations_of`, `entity_candidates`, `fetch_entities`, `source_progress`) / `StoreWrite` (`create_bank`, `create_source`, `append_chunks`, `claim_chunk`, `release_chunk`, `fail_chunk`, `commit_chunk`, `ensure_entity`, `insert_opinion`, `insert_observations`, `update_embeddings`, `increment_access`) / `StoreMaintenance` (`pending_work`, `gc_observations`), with `commit_chunk` remaining the only transaction entry.
 
 ## 2. Pipeline Implementation Notes
 

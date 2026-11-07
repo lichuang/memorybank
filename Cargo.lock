@@ -727,9 +727,11 @@ version = "0.1.0"
 dependencies = [
  "engine",
  "llm",
+ "serde_json",
  "sqlx",
  "store",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

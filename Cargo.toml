@@ -24,7 +24,7 @@ sha2 = "0.10"
 tracing = "0.1"
 sqlite-vec = "0.1"
 libsqlite3-sys = "0.37"
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 
 [workspace.lints.rust]
 # `deny` (not `forbid`) so the single SQLite-extension registration site can
