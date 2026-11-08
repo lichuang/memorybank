@@ -135,11 +135,11 @@ Chunking strategy (configuration): when the caller provides session/turn metadat
 | `id` | `Id` PK | u |
 | `bank_id` | `Id` → bank.id | b, required; deletion/partition key (§0.10) |
 | `fact_type` | `Enum{world, experience, opinion, observation}` | ℓ(f), owning network |
-| `text` | `Text` | t, narrative fact text (LLM rewrite + human-readable time prefix). Missing when/where/who/why dimensions are appended deterministically, so the retrieval corpus never loses them. Primary BM25/full-text corpus, content fed to the LLM, reranker input |
+| `text` | `Text` | t, narrative fact text (LLM rewrite + human-readable time prefix). The prefix uses the occurrence interval when known (date, or `From … to …` for a range) and falls back to the mention time. Missing when/where/who/why dimensions are appended deterministically, so the retrieval corpus never loses them. Primary BM25/full-text corpus, content fed to the LLM, reranker input |
 | `chunk_id` | `Id` nullable → chunk.id | provenance: the chunk slice this row was extracted from (always set for retain-produced rows). Verbatim source text lives in chunk/payload and is not duplicated here |
 | `occurred_start` | `TS` nullable | τs, occurrence interval start |
 | `occurred_end` | `TS` nullable | τe, occurrence interval end (= start for point events; NULL = open interval; both NULL = no temporal information) |
-| `mentioned_at` | `TS` nullable | τm, the time the fact was mentioned in conversation. Used for temporal decay edges, entity-resolution temporal proximity, and the "human-readable time prefix" augmentation |
+| `mentioned_at` | `TS` nullable | τm, the time the fact was mentioned in conversation. Used for entity-resolution temporal proximity and as the fallback time prefix when no occurrence interval is known (temporal edges use occurrence intervals, §5.5) |
 | `confidence` | `Float01` nullable | c, belief strength. See the conditional constraints below |
 | `access_count` | `Int` default 0 | x.access_count: incremented on recall hits; observability/tuning |
 | `attrs` | `JSON` nullable | remaining x: fact_kind, structured location, and the extraction dimensions (`when`/`where`/`who`/`why`) kept as an audit/fallback copy |
@@ -319,7 +319,7 @@ Key points:
 
 | Channel | Data source |
 |---|---|
-| Semantic (vector) | `fact_vec.embedding` (generated from fact text + human-readable time prefix; missing row = backfill pending; ANN indexing is adapter implementation freedom) |
+| Semantic (vector) | `fact_vec.embedding` (generated from `fact.text`, which already carries the time prefix; missing row = backfill pending; ANN indexing is adapter implementation freedom) |
 | Keyword (BM25) | `fact.text` (whether to also cover `chunk.text` as a verbatim fallback: see §7) |
 | Graph spreading | `fact_link` + `fact_entity` (activation starts from semantic hits; entity adjacency derived from bindings) |
 | Temporal filter | `fact.occurred_*` / `mentioned_at` interval matching |
@@ -350,7 +350,7 @@ Scheduling principle: implement what is in the paper first. Three tiers — **A 
 
 ### Tier A · Paper Mechanisms (first batch)
 
-1. Embedding input = stored text + human-readable time prefix, and **store the augmented full text** (one string across all paths); reranker input likewise carries time (paper §4.1.2).
+1. Embedding input = stored text (already includes the human-readable time prefix), and **store the augmented full text** (one string across all paths); reranker input likewise carries time (paper §4.1.2).
 2. Convention for extraction-produced opinion rows having nullable `confidence` (paper A.5.1 has no extraction-side confidence field) — accept it, or have the extraction prompt produce an initial confidence.
 3. Chunking strategy: session-alignment first / window fallback / configurable window size (paper §4.1.2 coarse-grained chunking, 2–5 narrative facts per chunk).
 4. Keep `access_count` or not (paper mechanism x.access_count; write amplification vs observability).

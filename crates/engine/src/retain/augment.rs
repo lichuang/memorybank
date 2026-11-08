@@ -68,16 +68,47 @@ pub fn augmented_text(narrative: &str, timestamp: Option<Timestamp>) -> String {
   }
 }
 
+/// Returns the human-readable time reference for a fact.
+///
+/// Occurrence-first: when both `occurred_start` and `occurred_end` are known,
+/// a single date is used for a point event and `From <start> to <end>` for an
+/// interval. A one-sided occurrence uses its known bound; only when the
+/// occurrence is entirely unknown does it fall back to `mentioned_at`. Returns
+/// `None` when no time is known.
+pub fn fact_time(extracted: &ExtractedFact) -> Option<String> {
+  match (extracted.occurred_start, extracted.occurred_end) {
+    (Some(start), Some(end)) if start == end => Some(human_readable(start)),
+    (Some(start), Some(end)) => {
+      let (start, end) = if start <= end {
+        (start, end)
+      } else {
+        (end, start)
+      };
+      Some(format!(
+        "From {} to {}",
+        human_readable(start),
+        human_readable(end)
+      ))
+    }
+    (Some(start), None) => Some(human_readable(start)),
+    (None, Some(end)) => Some(human_readable(end)),
+    (None, None) => extracted.mentioned_at.map(human_readable),
+  }
+}
+
 /// Builds the stored `fact.text` from an extracted fact.
 ///
-/// The narrative is `what` with the `mentioned_at` prefix. The prompt asks the
-/// model to weave when/where/who/why into `what`, but that is not guaranteed, so
-/// any non-empty dimension not already present is appended in a compact suffix.
-/// This keeps the information visible to BM25, vector search, and the reranker
-/// instead of losing it. The returned string is exactly what is stored and
-/// embedded.
+/// The prefix is [`fact_time`] (occurrence date/range when known, otherwise the
+/// mention time). The prompt asks the model to weave when/where/who/why into
+/// `what`, but that is not guaranteed, so any non-empty dimension not already
+/// present is appended in a compact suffix. This keeps the information visible
+/// to BM25, vector search, and the reranker instead of losing it. The returned
+/// string is exactly what is stored and embedded.
 pub fn fact_text(extracted: &ExtractedFact) -> String {
-  let narrative = augmented_text(&extracted.what, extracted.mentioned_at);
+  let narrative = match fact_time(extracted) {
+    Some(reference) => format!("{reference}. {}", extracted.what),
+    None => extracted.what.clone(),
+  };
   let mut missing = Vec::new();
 
   for (label, value) in [
@@ -273,6 +304,55 @@ mod tests {
       "Emily joined Google as a software engineer. \
        (when: Saturday, June 9, 2024; where: Berlin; why: career growth)"
     );
+  }
+
+  #[test]
+  fn fact_text_prefers_occurrence_time_over_mention_time() {
+    let mut fact = extracted();
+    fact.occurred_start = Some(timestamp(1_741_564_800_000)); // 2025-03-10
+    fact.occurred_end = fact.occurred_start;
+    fact.mentioned_at = Some(timestamp(1_749_427_200_000)); // 2025-06-09
+    fact.when.clear();
+    fact.where_.clear();
+    fact.who.clear();
+    fact.why.clear();
+
+    let text = fact_text(&fact);
+    assert!(text.starts_with("Monday, March 10, 2025. "), "text: {text}");
+    assert!(!text.contains("June"), "text: {text}");
+  }
+
+  #[test]
+  fn fact_text_formats_an_occurrence_range() {
+    let mut fact = extracted();
+    fact.occurred_start = Some(timestamp(1_741_564_800_000)); // 2025-03-10
+    fact.occurred_end = Some(timestamp(1_741_737_600_000)); // 2025-03-12
+    fact.mentioned_at = None;
+    fact.when.clear();
+    fact.where_.clear();
+    fact.who.clear();
+    fact.why.clear();
+
+    let text = fact_text(&fact);
+    assert!(
+      text.starts_with("From Monday, March 10, 2025 to Wednesday, March 12, 2025. "),
+      "text: {text}"
+    );
+  }
+
+  #[test]
+  fn fact_text_falls_back_to_mention_time() {
+    let mut fact = extracted();
+    fact.occurred_start = None;
+    fact.occurred_end = None;
+    fact.mentioned_at = Some(timestamp(1_741_564_800_000));
+    fact.when.clear();
+    fact.where_.clear();
+    fact.who.clear();
+    fact.why.clear();
+
+    let text = fact_text(&fact);
+    assert!(text.starts_with("Monday, March 10, 2025. "), "text: {text}");
   }
 
   #[test]
