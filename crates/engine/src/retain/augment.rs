@@ -1,32 +1,26 @@
 //! Time normalization and augmented text.
 //!
 //! The stored `fact.text` is already the augmented string: `what` (a complete
-//! narrative) prefixed with the human-readable mention time. The same string is
-//! fed to the embedder and the reranker, so retrieval never sees a different
-//! representation than what is stored (schema §7.A#1).
+//! narrative) prefixed with a human-readable time reference (occurrence when
+//! known, otherwise the mention time). The same string is fed to the embedder
+//! and the reranker, so retrieval never sees a different representation than
+//! what is stored (schema §7.A#1).
 
 use chrono::Datelike;
 
 use crate::types::{Chunk, ExtractedFact, Timestamp, from_epoch_millis, to_epoch_millis};
 
-/// Fills missing time fields from the chunk's known bounds.
+/// Fills the mention time from the chunk's known bounds.
 ///
-/// - `occurred_start` / `occurred_end` default to the chunk interval ends;
-/// - `mentioned_at` defaults to the chunk interval midpoint (or its only bound).
+/// Only `mentioned_at` is derived (the chunk midpoint, or its only bound).
+/// Occurrence bounds are **never** fabricated from the chunk: the chunk window
+/// is conversation time, not when the fact happened. A one-sided occurrence
+/// stays one-sided (an open interval); `validate_extracted` still rejects
+/// reversed or end-only pairs as model errors.
 ///
 /// The wall clock is deliberately **not** used: a fact with no temporal context
 /// keeps `None` instead of being stamped with ingestion time.
-///
-/// The extraction pass calls this before
-/// [`crate::retain::extract::validate_extracted`]: a fact whose filled interval
-/// is reversed or end-only is discarded there, not repaired here.
 pub fn normalize_time(extracted: &mut ExtractedFact, chunk: &Chunk) {
-  if extracted.occurred_start.is_none() {
-    extracted.occurred_start = chunk.time_start;
-  }
-  if extracted.occurred_end.is_none() {
-    extracted.occurred_end = chunk.time_end;
-  }
   if extracted.mentioned_at.is_none() {
     extracted.mentioned_at = match (chunk.time_start, chunk.time_end) {
       (Some(start), Some(end)) => Some(midpoint(start, end)),
@@ -208,13 +202,13 @@ mod tests {
   }
 
   #[test]
-  fn fills_missing_times_from_the_chunk_interval() {
+  fn fills_only_the_mention_time_from_the_chunk() {
     let mut fact = extracted();
 
     normalize_time(&mut fact, &chunk(Some(10_000), Some(20_000)));
 
-    assert_eq!(fact.occurred_start, Some(timestamp(10_000)));
-    assert_eq!(fact.occurred_end, Some(timestamp(20_000)));
+    assert_eq!(fact.occurred_start, None, "occurrence is never fabricated");
+    assert_eq!(fact.occurred_end, None, "occurrence is never fabricated");
     assert_eq!(fact.mentioned_at, Some(timestamp(15_000)), "midpoint");
   }
 
@@ -223,12 +217,14 @@ mod tests {
     let mut start_only = extracted();
     normalize_time(&mut start_only, &chunk(Some(10_000), None));
     assert_eq!(start_only.mentioned_at, Some(timestamp(10_000)));
-    assert_eq!(start_only.occurred_end, None, "no end is invented");
+    assert_eq!(start_only.occurred_start, None);
+    assert_eq!(start_only.occurred_end, None);
 
     let mut end_only = extracted();
     normalize_time(&mut end_only, &chunk(None, Some(20_000)));
     assert_eq!(end_only.mentioned_at, Some(timestamp(20_000)));
     assert_eq!(end_only.occurred_start, None);
+    assert_eq!(end_only.occurred_end, None);
   }
 
   #[test]
@@ -241,9 +237,8 @@ mod tests {
 
     assert_eq!(fact.occurred_start, Some(timestamp(5_000)));
     assert_eq!(
-      fact.occurred_end,
-      Some(timestamp(20_000)),
-      "only the end was missing"
+      fact.occurred_end, None,
+      "occurrence is not filled from the chunk"
     );
     assert_eq!(fact.mentioned_at, Some(timestamp(7_000)));
   }

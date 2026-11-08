@@ -48,6 +48,11 @@ pub fn temporal_weight(gap: Duration, sigma: Duration) -> f32 {
 /// interval has no meaningful gap and is skipped. Intervals with `end < start`
 /// are normalized before scoring.
 ///
+/// Occurrence bounds are never derived from the chunk window, so facts whose
+/// time the model did not resolve also get no temporal edges. Ongoing facts
+/// (`Open`, e.g. "working at Google since May 2023") are skipped for the same
+/// reason; a future extension could treat them as `[start, +∞)`.
+///
 /// # Algorithm
 ///
 /// 1. **Filter + normalize**: keep the new facts that have a complete interval.

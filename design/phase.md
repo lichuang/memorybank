@@ -409,8 +409,8 @@ pub fn validate_extracted(f: &ExtractedFact) -> Option<&'static str>   // reason
 - **Design**:
 ```rust
 pub fn normalize_time(extracted:&mut ExtractedFact, chunk:&Chunk)
-// occurred_start/end ← chunk.time_start/time_end when missing;
 // mentioned_at ← chunk midpoint (or its only bound); never clock.now()
+// occurred_* are never derived from the chunk (conversation window ≠ event interval)
 pub fn human_readable(ts: Timestamp) -> String            // "Sunday, June 9, 2024" (no padding)
 pub fn augmented_text(narrative:&str, ts: Option<Timestamp>) -> String  // "{human}. {narrative}" / narrative
 pub fn fact_time(extracted:&ExtractedFact) -> Option<String> // occurrence date/range, fallback mentioned_at
@@ -418,11 +418,11 @@ pub fn fact_text(extracted:&ExtractedFact) -> String      // what + fact_time pr
 pub fn fact_attrs(extracted:&ExtractedFact) -> Option<serde_json::Value>  // structured when/where/who/why
 ```
 - **Composition**: `fact.text` = `fact_time` prefix + `what`, plus a deterministic `(when: …; where: …; who: …; why: …)` suffix for any non-empty dimension not already present in the narrative; `fact.attrs` stores the four structured fields. `fact_time` is occurrence-first: a single date when `occurred_start == occurred_end`, `From <start> to <end>` for an interval, a one-sided occurrence for a single bound, and `mentioned_at` only when the occurrence is unknown. The prompt still asks `what` to weave the dimensions, but the fallback prevents permanent loss when the model does not. `fact_text` remains both `fact.text` and the embedding/reranker input (one string across all paths, schema §7.A#1).
-- **Validation order**: `extract_facts` calls `normalize_time` before `validate_extracted`, so validation sees the final chunk-filled times. An interval with `end < start`, or an end without a start, discards the fact (causal references to it are remapped away); a start-only interval is a valid open interval.
+- **Validation order**: `extract_facts` calls `normalize_time` before `validate_extracted`. `normalize_time` only fills `mentioned_at`; occurrence bounds stay as the model reported them. An interval with `end < start`, or an end without a start, discards the fact (causal references to it are remapped away); a start-only interval is a valid open interval, so future events are kept.
 - **Typed interval**: `Fact` and `NewFact` carry `occurred: OccurrenceInterval` instead of two independent options. `OccurrenceInterval::from_parts` rejects reversed and end-only bounds, so an invalid interval cannot exist in a fact; the store skips a corrupt legacy row individually (with a warning) instead of failing the whole read.
-- **No fabrication**: without a chunk interval all three times stay `None`; `occurred_end` is never synthesized from `occurred_start`.
-- **Acceptance**: never fabricate time (None stays None); stored text == embedding input (the same string); the prefix uses the occurrence interval when known and falls back to the mention time; prefix format `"<weekday>, <month> <day>, <year>. "` (ranges use `"From … to …. "`); dimensions missing from `what` are appended and copied to `attrs`.
-- **Tests**: fill from chunk bounds; midpoint; single-bound fallback; user-supplied times untouched; no chunk times → all None; reversed and end-only intervals discarded after normalization while open intervals are kept; human-readable format (weekday correctness); prefix only when a time exists; occurrence preferred over mention; occurrence ranges; mention fallback; `fact_text` appends only missing dimensions and does not duplicate woven ones; `fact_attrs` keeps the structured fields.
+- **No fabrication**: occurrence bounds are never derived from the chunk window; without them only `mentioned_at` is filled. `occurred_end` is never synthesized from `occurred_start`.
+- **Acceptance**: never fabricate time (None stays None); stored text == embedding input (the same string); the prefix uses the occurrence interval when known and falls back to the mention time; occurrence is never fabricated from the chunk; prefix format `"<weekday>, <month> <day>, <year>. "` (ranges use `"From … to …. "`); dimensions missing from `what` are appended and copied to `attrs`.
+- **Tests**: only the mention time is filled from chunk bounds; occurrence stays `None` when the model gave none; a future start-only interval is kept as open; end-only and reversed intervals are discarded; user-supplied times untouched; no chunk times → all times `None`; human-readable format (weekday correctness); prefix only when a time exists; occurrence preferred over mention; occurrence ranges; mention fallback; `fact_text` appends only missing dimensions and does not duplicate woven ones; `fact_attrs` keeps the structured fields.
 
 ## P1-9 Entity Resolution ρ
 
@@ -518,6 +518,10 @@ pub struct LinkConfig { pub temporal_window: Duration /* 24h */,
   Each new fact keeps its `temporal_top_k` closest candidates, pairs are deduplicated by
   canonical key, and each surviving pair yields `from→to` plus `to→from` with equal weight
   and `created_at = now` (the only clock use).
+  **Coverage note**: occurrence bounds are never derived from the chunk window (P1-8), so
+  only facts whose time the model actually resolved participate in temporal links and range
+  queries. Ongoing facts (`Open`, e.g. "working at Google since May 2023") currently get no
+  temporal edges; a future extension may treat them as `[start, +∞)`.
 - **Acceptance**: reciprocal pairs always complete (canonical-key count is 2); pruning
   leaves no one-sided rows; rows without a complete time interval create no edges.
 - **Tests**: weight formula (including σ=0); interval gap; three-fact time window;

@@ -50,13 +50,14 @@ pub struct ExtractionReport {
 
 /// Extracts facts from one chunk.
 ///
-/// Each proposal is first normalized against the chunk's time bounds, then
-/// validated fact by fact: invalid facts (empty text, observation rows,
-/// reversed or end-only occurrence intervals) are counted and dropped, and
-/// causal references are remapped to the surviving list (references to dropped
-/// facts, out-of-range indices, and self-references are removed). Transport
-/// errors (timeouts, malformed JSON, schema mismatches) propagate unchanged, so
-/// the caller can retry only [`crate::Error::Retryable`].
+/// Each proposal first receives a mention time from the chunk (`normalize_time`;
+/// occurrence bounds are never fabricated), then is validated fact by fact:
+/// invalid facts (empty text, observation rows, reversed or end-only occurrence
+/// intervals) are counted and dropped, and causal references are remapped to the
+/// surviving list (references to dropped facts, out-of-range indices, and
+/// self-references are removed). Transport errors (timeouts, malformed JSON,
+/// schema mismatches) propagate unchanged, so the caller can retry only
+/// [`crate::Error::Retryable`].
 pub async fn extract_facts(
   llm: &dyn Llm,
   chunk: &Chunk,
@@ -81,8 +82,11 @@ pub async fn extract_facts(
 
 /// Returns a reason when a single extracted fact must be discarded.
 ///
-/// Call this **after** [`normalize_time`]: the occurrence checks (no end-only
-/// interval, no reversed bounds) apply to the final, chunk-filled times.
+/// The occurrence checks (no end-only interval, no reversed bounds) apply to the
+/// bounds reported by the model; `mentioned_at` is not inspected.
+/// [`normalize_time`] only fills the mention time, so there is no ordering
+/// requirement between the two functions.
+///
 /// `fact_type` is already validated by deserialization; the rest are semantic
 /// rules. An open interval (`start` only) is valid: the event is still ongoing.
 pub fn validate_extracted(fact: &ExtractedFact) -> Option<&'static str> {
@@ -425,18 +429,18 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn normalizes_then_discards_reversed_intervals() {
+  async fn keeps_future_open_intervals_and_discards_end_only() {
     let llm = FakeLlm::new();
     llm.push(
       "fact_extraction",
       json!({
         "facts": [
-          // Start after the chunk end: filling the missing end creates a reversal.
-          fact_json_at("reversed", Some(25_000), None),
-          // End-only: filling the start from the chunk makes it valid.
-          fact_json_at("fixed", None, Some(15_000)),
-          // No times: both sides come from the chunk.
-          fact_json("filled")
+          // A future start is a valid open interval; no end is invented.
+          fact_json_at("future", Some(25_000), None),
+          // End-only has no representable interval and is discarded.
+          fact_json_at("end only", None, Some(15_000)),
+          // No times: occurrence stays unknown; only the mention time is filled.
+          fact_json("untimed")
         ]
       }),
     );
@@ -452,13 +456,15 @@ mod tests {
     assert_eq!(report.discarded, 1);
     assert_eq!(report.facts.len(), 2);
 
-    assert_eq!(report.facts[0].what, "fixed");
-    assert_eq!(report.facts[0].occurred_start, Some(timestamp(10_000)));
-    assert_eq!(report.facts[0].occurred_end, Some(timestamp(15_000)));
+    assert_eq!(report.facts[0].what, "future");
+    assert_eq!(report.facts[0].occurred_start, Some(timestamp(25_000)));
+    assert_eq!(report.facts[0].occurred_end, None);
+    assert_eq!(report.facts[0].mentioned_at, Some(timestamp(15_000)));
 
-    assert_eq!(report.facts[1].what, "filled");
-    assert_eq!(report.facts[1].occurred_start, Some(timestamp(10_000)));
-    assert_eq!(report.facts[1].occurred_end, Some(timestamp(20_000)));
+    assert_eq!(report.facts[1].what, "untimed");
+    assert_eq!(report.facts[1].occurred_start, None);
+    assert_eq!(report.facts[1].occurred_end, None);
+    assert_eq!(report.facts[1].mentioned_at, Some(timestamp(15_000)));
   }
 
   #[tokio::test]
@@ -495,7 +501,7 @@ mod tests {
       "fact_extraction",
       json!({
         "facts": [
-          fact_json_at("reversed", Some(25_000), None),
+          fact_json_at("reversed", Some(25_000), Some(20_000)),
           {
             "what": "references the bad fact", "when": "w", "where": "w", "who": "w",
             "why": "w", "fact_type": "world",
