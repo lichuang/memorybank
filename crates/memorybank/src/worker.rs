@@ -7,7 +7,7 @@ use engine::link::{LinkConfig, build_semantic_links, build_temporal_links, causa
 use engine::ports::{ChunkCommit, EntityStatUpdate, NewBinding, NewChunk, NewFact, now_ts};
 use engine::resolve::{MentionContext, ResolveWeights, resolve};
 use engine::retain::{
-  ExtractionConfig, NormalizedPayload, chunk, embed_facts, extract_facts, fact_text,
+  ExtractionConfig, NormalizedPayload, chunk, embed_facts, extract_facts, fact_attrs, fact_text,
 };
 use engine::tokens::CharHeuristic;
 use engine::types::{BankId, Chunk, ChunkId, EntityId, Fact, FactId, OccurrenceInterval};
@@ -244,7 +244,7 @@ impl MemoryBank {
         mentioned_at: extracted.mentioned_at,
         confidence: None,
         access_count: 0,
-        attrs: None,
+        attrs: fact_attrs(extracted),
         created_at: now,
         updated_at: now,
       });

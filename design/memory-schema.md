@@ -135,14 +135,14 @@ Chunking strategy (configuration): when the caller provides session/turn metadat
 | `id` | `Id` PK | u |
 | `bank_id` | `Id` → bank.id | b, required; deletion/partition key (§0.10) |
 | `fact_type` | `Enum{world, experience, opinion, observation}` | ℓ(f), owning network |
-| `text` | `Text` | t, narrative fact text (LLM rewrite). Primary BM25/full-text corpus, content fed to the LLM, reranker input |
+| `text` | `Text` | t, narrative fact text (LLM rewrite + human-readable time prefix). Missing when/where/who/why dimensions are appended deterministically, so the retrieval corpus never loses them. Primary BM25/full-text corpus, content fed to the LLM, reranker input |
 | `chunk_id` | `Id` nullable → chunk.id | provenance: the chunk slice this row was extracted from (always set for retain-produced rows). Verbatim source text lives in chunk/payload and is not duplicated here |
 | `occurred_start` | `TS` nullable | τs, occurrence interval start |
 | `occurred_end` | `TS` nullable | τe, occurrence interval end (= start for point events; NULL = open interval; both NULL = no temporal information) |
 | `mentioned_at` | `TS` nullable | τm, the time the fact was mentioned in conversation. Used for temporal decay edges, entity-resolution temporal proximity, and the "human-readable time prefix" augmentation |
 | `confidence` | `Float01` nullable | c, belief strength. See the conditional constraints below |
 | `access_count` | `Int` default 0 | x.access_count: incremented on recall hits; observability/tuning |
-| `attrs` | `JSON` nullable | remaining x: fact_kind, structured location, and other fields the paper leaves open |
+| `attrs` | `JSON` nullable | remaining x: fact_kind, structured location, and the extraction dimensions (`when`/`where`/`who`/`why`) kept as an audit/fallback copy |
 
 Engine representation: `Fact.occurred` is an `OccurrenceInterval` (`Closed(ClosedInterval)` / `Open { start }` / `Unknown`). `from_parts` rejects `end < start` and end-only rows; reads skip a corrupt legacy row individually (with a warning) instead of failing the batch.
 
@@ -296,7 +296,7 @@ Key points:
 
 | ExtractedFact field (paper A.5.1) | Lands in |
 |---|---|
-| the five dimensions (what/when/where/who/why) woven into one narrative | `fact.text` |
+| the five dimensions (what/when/where/who/why) woven into one narrative; dimensions missing from `what` are appended deterministically | `fact.text`; structured copies in `fact.attrs` |
 | fact_type | `fact.fact_type` (world/experience/opinion) |
 | occurred_start / occurred_end (normalized absolute times) | `fact.occurred_start` / `occurred_end` |
 | mentioned_at | `fact.mentioned_at` |

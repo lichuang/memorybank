@@ -70,12 +70,71 @@ pub fn augmented_text(narrative: &str, timestamp: Option<Timestamp>) -> String {
 
 /// Builds the stored `fact.text` from an extracted fact.
 ///
-/// The narrative is `what` (the prompt requires it to weave in the other four
-/// dimensions); the prefix uses `mentioned_at`. Call
-/// [`normalize_time`] first so a missing `mentioned_at` can be filled from the
-/// chunk.
+/// The narrative is `what` with the `mentioned_at` prefix. The prompt asks the
+/// model to weave when/where/who/why into `what`, but that is not guaranteed, so
+/// any non-empty dimension not already present is appended in a compact suffix.
+/// This keeps the information visible to BM25, vector search, and the reranker
+/// instead of losing it. The returned string is exactly what is stored and
+/// embedded.
 pub fn fact_text(extracted: &ExtractedFact) -> String {
-  augmented_text(&extracted.what, extracted.mentioned_at)
+  let narrative = augmented_text(&extracted.what, extracted.mentioned_at);
+  let mut missing = Vec::new();
+
+  for (label, value) in [
+    ("when", extracted.when.as_str()),
+    ("where", extracted.where_.as_str()),
+    ("who", extracted.who.as_str()),
+    ("why", extracted.why.as_str()),
+  ] {
+    if !value.trim().is_empty() && !contains_normalized(&narrative, value) {
+      missing.push(format!("{label}: {value}"));
+    }
+  }
+
+  if missing.is_empty() {
+    narrative
+  } else {
+    format!("{narrative} ({})", missing.join("; "))
+  }
+}
+
+/// Structured extraction dimensions kept for audit and future retrieval.
+///
+/// Empty fields are omitted; returns `None` when all four are empty.
+pub fn fact_attrs(extracted: &ExtractedFact) -> Option<serde_json::Value> {
+  let mut attrs = serde_json::Map::new();
+  for (key, value) in [
+    ("when", extracted.when.as_str()),
+    ("where", extracted.where_.as_str()),
+    ("who", extracted.who.as_str()),
+    ("why", extracted.why.as_str()),
+  ] {
+    if !value.trim().is_empty() {
+      attrs.insert(
+        key.to_string(),
+        serde_json::Value::String(value.to_string()),
+      );
+    }
+  }
+
+  if attrs.is_empty() {
+    None
+  } else {
+    Some(serde_json::Value::Object(attrs))
+  }
+}
+
+fn contains_normalized(haystack: &str, needle: &str) -> bool {
+  let needle = normalize_whitespace(needle);
+  !needle.is_empty() && normalize_whitespace(haystack).contains(&needle)
+}
+
+fn normalize_whitespace(value: &str) -> String {
+  value
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_lowercase()
 }
 
 #[cfg(test)]
@@ -194,7 +253,7 @@ mod tests {
   }
 
   #[test]
-  fn fact_text_uses_what_and_mentioned_at() {
+  fn fact_text_prefixes_time_and_appends_missing_dimensions() {
     let mut fact = extracted();
     normalize_time(
       &mut fact,
@@ -203,11 +262,42 @@ mod tests {
 
     assert_eq!(
       fact_text(&fact),
-      "Sunday, June 9, 2024. Emily joined Google as a software engineer."
+      "Sunday, June 9, 2024. Emily joined Google as a software engineer. \
+       (when: Saturday, June 9, 2024; where: Berlin; why: career growth)"
     );
 
     let mut untimed = extracted();
     normalize_time(&mut untimed, &chunk(None, None));
-    assert_eq!(fact_text(&untimed), untimed.what);
+    assert_eq!(
+      fact_text(&untimed),
+      "Emily joined Google as a software engineer. \
+       (when: Saturday, June 9, 2024; where: Berlin; why: career growth)"
+    );
+  }
+
+  #[test]
+  fn fact_text_does_not_duplicate_weaved_dimensions() {
+    let mut fact = extracted();
+    fact.what =
+      "On Saturday, June 9, 2024, Emily joined Google in Berlin because of career growth.".into();
+    normalize_time(&mut fact, &chunk(None, None));
+
+    assert_eq!(fact_text(&fact), fact.what);
+  }
+
+  #[test]
+  fn fact_attrs_keeps_the_structured_dimensions() {
+    let attrs = fact_attrs(&extracted()).expect("non-empty attrs");
+    assert_eq!(attrs["when"], "Saturday, June 9, 2024");
+    assert_eq!(attrs["where"], "Berlin");
+    assert_eq!(attrs["who"], "Emily");
+    assert_eq!(attrs["why"], "career growth");
+
+    let mut empty = extracted();
+    empty.when.clear();
+    empty.where_.clear();
+    empty.who.clear();
+    empty.why.clear();
+    assert_eq!(fact_attrs(&empty), None);
   }
 }
