@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::ports::{NewLink, Store};
+use crate::ports::{FactScope, NewLink, Store};
 use crate::types::{
   BankId, Fact, FactId, LinkId, LinkType, OccurrenceInterval, TimeRange, Timestamp,
   from_epoch_millis, to_epoch_millis,
@@ -157,7 +157,7 @@ pub async fn build_temporal_links(
       end: from_epoch_millis(end)
         .ok_or_else(|| Error::config("temporal window end is out of range"))?,
     };
-    for id in store.facts_in_range(bank, range).await? {
+    for id in store.facts_in_range(bank, range, &FactScope::All).await? {
       if !new_ids.contains(&id) {
         existing_ids.insert(id);
       }

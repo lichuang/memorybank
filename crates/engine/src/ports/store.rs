@@ -87,30 +87,39 @@ pub trait Store: Send + Sync {
 
   // —— Retrieval ——
 
-  /// Top-`k` facts by cosine similarity against `query`; rows without an
-  /// embedding are skipped. Adapters may use ANN internally; the contract is
-  /// "best `k` matches".
+  /// Top-`k` facts in `scope` by cosine similarity against `query`; rows
+  /// without an embedding are skipped. Adapters may use ANN internally; the
+  /// contract is "best `k` matches within the scope".
   async fn search_vector(
     &self,
     bank: BankId,
     query: &[f32],
     k: usize,
+    scope: &FactScope,
   ) -> Result<Vec<(FactId, f32)>>;
 
-  /// Top-`k` facts by lexical (BM25) similarity to `query`.
-  async fn search_bm25(&self, bank: BankId, query: &str, k: usize) -> Result<Vec<(FactId, f32)>>;
+  /// Top-`k` facts in `scope` by lexical (BM25) similarity to `query`.
+  async fn search_bm25(
+    &self,
+    bank: BankId,
+    query: &str,
+    k: usize,
+    scope: &FactScope,
+  ) -> Result<Vec<(FactId, f32)>>;
 
-  /// Outgoing neighbors of `from`: `fact_link` edges merged with entity
-  /// adjacency derived from `fact_entity` bindings (weight 1.0). The pairwise
-  /// closure is never materialized.
-  async fn neighbors(&self, bank: BankId, from: FactId) -> Result<Vec<Neighbor>>;
+  /// Outgoing neighbors of `from` in `scope`: `fact_link` edges merged with
+  /// entity adjacency derived from `fact_entity` bindings (weight 1.0). The
+  /// pairwise closure is never materialized.
+  async fn neighbors(&self, bank: BankId, from: FactId, scope: &FactScope)
+  -> Result<Vec<Neighbor>>;
 
-  /// Facts whose occurrence interval intersects `range` (closed interval).
-  /// Rows with an invalid occurrence interval are excluded.
+  /// Facts in `scope` whose occurrence interval intersects `range` (closed
+  /// interval). Rows with an invalid occurrence interval are excluded.
   async fn facts_in_range(
     &self,
     bank: BankId,
     range: crate::types::TimeRange,
+    scope: &FactScope,
   ) -> Result<Vec<FactId>>;
 
   /// Loads facts by id in one round trip; order is unspecified.
@@ -408,6 +417,27 @@ pub struct WorkLists {
   pub entities_stale_observation: Vec<EntityId>,
 }
 
+/// Retrieval scope: all memory units, or a target network subset.
+///
+/// The paper scopes vector/BM25/temporal retrieval to "the set of all memory
+/// units in the target network"; [`FactScope::Types`] expresses that subset.
+/// An empty `Types` list means "no facts", not "all facts".
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FactScope {
+  /// Every network.
+  #[default]
+  All,
+  /// Only the listed networks.
+  Types(Vec<FactType>),
+}
+
+impl FactScope {
+  /// Builds a scope from an iterator of network types.
+  pub fn types(types: impl IntoIterator<Item = FactType>) -> Self {
+    Self::Types(types.into_iter().collect())
+  }
+}
+
 /// Derived progress for one source (aggregated from chunk rows; no progress table).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceProgress {
@@ -531,6 +561,7 @@ mod tests {
       _bank: BankId,
       _query: &[f32],
       _k: usize,
+      _scope: &FactScope,
     ) -> Result<Vec<(FactId, f32)>> {
       unreachable!("stub")
     }
@@ -539,16 +570,23 @@ mod tests {
       _bank: BankId,
       _query: &str,
       _k: usize,
+      _scope: &FactScope,
     ) -> Result<Vec<(FactId, f32)>> {
       unreachable!("stub")
     }
-    async fn neighbors(&self, _bank: BankId, _from: FactId) -> Result<Vec<Neighbor>> {
+    async fn neighbors(
+      &self,
+      _bank: BankId,
+      _from: FactId,
+      _scope: &FactScope,
+    ) -> Result<Vec<Neighbor>> {
       unreachable!("stub")
     }
     async fn facts_in_range(
       &self,
       _bank: BankId,
       _range: crate::types::TimeRange,
+      _scope: &FactScope,
     ) -> Result<Vec<FactId>> {
       unreachable!("stub")
     }

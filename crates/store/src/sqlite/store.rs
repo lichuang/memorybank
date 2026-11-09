@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use engine::ports::{
-  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NewChunk, NewEntity,
-  NewObservation, NewOpinion, SourceProgress, Store, WorkLists,
+  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, FactScope, Neighbor, NewChunk,
+  NewEntity, NewObservation, NewOpinion, SourceProgress, Store, WorkLists,
 };
 use engine::types::{
   Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, Entity, EntityId, EntityKind, Fact,
@@ -386,6 +386,7 @@ impl Store for SqliteStore {
     bank: BankId,
     query: &[f32],
     k: usize,
+    scope: &FactScope,
   ) -> Result<Vec<(FactId, f32)>> {
     if k == 0 {
       return Ok(Vec::new());
@@ -401,25 +402,18 @@ impl Store for SqliteStore {
     // distances in any order, so over-fetch one row, sort by (score, id), then
     // truncate.
     let fetch_k = k.saturating_add(1);
+    let mut results = Vec::new();
 
-    let rows: Vec<(String, f64)> = sqlx::query_as(
-      "SELECT f.id, v.distance FROM fact_vec v JOIN fact f ON f.rowid = v.rowid \
-       WHERE v.embedding MATCH ? AND k = ? AND v.bank_id = ?",
-    )
-    .bind(encode_embedding(query))
-    .bind(i64::try_from(fetch_k).unwrap_or(i64::MAX))
-    .bind(bank.to_string())
-    .fetch_all(&self.pool)
-    .await
-    .map_err(|error| map_read("vector index", error))?;
-
-    let mut results = Vec::with_capacity(rows.len());
-    for (id, distance) in rows {
-      let id = FactId::parse(&id)
-        .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
-      // vec0's cosine distance is `1 - cosine`; convert back to similarity.
-      let score = (1.0 - distance) as f32;
-      results.push((id, score.clamp(-1.0, 1.0)));
+    match scope {
+      FactScope::All => {
+        results.extend(vector_search_page(&self.pool, bank, query, fetch_k, None).await?);
+      }
+      FactScope::Types(types) => {
+        for fact_type in types {
+          results
+            .extend(vector_search_page(&self.pool, bank, query, fetch_k, Some(*fact_type)).await?);
+        }
+      }
     }
 
     results.sort_by(|left, right| {
@@ -428,6 +422,7 @@ impl Store for SqliteStore {
         .total_cmp(&left.1)
         .then_with(|| left.0.cmp(&right.0))
     });
+    results.dedup_by_key(|(id, _)| *id);
     results.truncate(k);
 
     Ok(results)
@@ -438,32 +433,62 @@ impl Store for SqliteStore {
     _bank: BankId,
     _query: &str,
     _k: usize,
+    _scope: &FactScope,
   ) -> Result<Vec<(FactId, f32)>> {
     Err(not_implemented("search_bm25"))
   }
 
-  async fn neighbors(&self, _bank: BankId, _from: FactId) -> Result<Vec<Neighbor>> {
+  async fn neighbors(
+    &self,
+    _bank: BankId,
+    _from: FactId,
+    _scope: &FactScope,
+  ) -> Result<Vec<Neighbor>> {
     Err(not_implemented("neighbors"))
   }
 
-  async fn facts_in_range(&self, bank: BankId, range: TimeRange) -> Result<Vec<FactId>> {
+  async fn facts_in_range(
+    &self,
+    bank: BankId,
+    range: TimeRange,
+    scope: &FactScope,
+  ) -> Result<Vec<FactId>> {
+    if let FactScope::Types(types) = scope
+      && types.is_empty()
+    {
+      return Ok(Vec::new());
+    }
+
     // Closed operation interval; an open end (`occurred_end IS NULL`) means
     // "still ongoing", so it intersects every range starting before its start.
     // Rows with no start carry no usable interval.
-    let rows: Vec<String> = sqlx::query_scalar(
-      "SELECT id FROM fact \
-       WHERE bank_id = ? AND occurred_start IS NOT NULL \
+    let mut query = QueryBuilder::<Sqlite>::new("SELECT id FROM fact WHERE bank_id = ");
+    query.push_bind(bank.to_string());
+    query.push(
+      " AND occurred_start IS NOT NULL \
          AND (occurred_end IS NULL OR occurred_end >= occurred_start) \
-         AND occurred_start <= ? \
-         AND (occurred_end IS NULL OR occurred_end >= ?) \
-       ORDER BY occurred_start, id",
-    )
-    .bind(bank.to_string())
-    .bind(to_epoch_millis(range.end))
-    .bind(to_epoch_millis(range.start))
-    .fetch_all(&self.pool)
-    .await
-    .map_err(|error| map_read("fact", error))?;
+         AND occurred_start <= ",
+    );
+    query.push_bind(to_epoch_millis(range.end));
+    query.push(" AND (occurred_end IS NULL OR occurred_end >= ");
+    query.push_bind(to_epoch_millis(range.start));
+    query.push(")");
+
+    if let FactScope::Types(types) = scope {
+      query.push(" AND fact_type IN (");
+      let mut separated = query.separated(", ");
+      for fact_type in types {
+        separated.push_bind(fact_type.as_str());
+      }
+      query.push(")");
+    }
+
+    query.push(" ORDER BY occurred_start, id");
+    let rows: Vec<String> = query
+      .build_query_scalar()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("fact", error))?;
 
     rows
       .into_iter()
@@ -1005,8 +1030,8 @@ async fn commit_chunk_tx(tx: &mut Transaction<'_, Sqlite>, commit: &ChunkCommit)
 
     if let Some(embedding) = &fact.embedding {
       sqlx::query(
-        "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
-         SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+        "INSERT INTO fact_vec(rowid, fact_id, bank_id, fact_type, embedding) \
+         SELECT rowid, id, bank_id, fact_type, ? FROM fact WHERE id = ?",
       )
       .bind(encode_embedding(embedding))
       .bind(fact.id.to_string())
@@ -1133,6 +1158,51 @@ async fn commit_chunk_tx(tx: &mut Transaction<'_, Sqlite>, commit: &ChunkCommit)
   }
 
   Ok(())
+}
+
+/// Runs one scoped vec0 KNN page and converts distance to cosine similarity.
+async fn vector_search_page(
+  pool: &SqlitePool,
+  bank: BankId,
+  query: &[f32],
+  k: usize,
+  fact_type: Option<FactType>,
+) -> Result<Vec<(FactId, f32)>> {
+  let rows: Vec<(String, f64)> = if let Some(fact_type) = fact_type {
+    sqlx::query_as(
+      "SELECT fact_id, distance FROM fact_vec \
+       WHERE embedding MATCH ? AND k = ? AND bank_id = ? AND fact_type = ?",
+    )
+    .bind(encode_embedding(query))
+    .bind(i64::try_from(k).unwrap_or(i64::MAX))
+    .bind(bank.to_string())
+    .bind(fact_type.as_str())
+    .fetch_all(pool)
+    .await
+    .map_err(|error| map_read("vector index", error))?
+  } else {
+    sqlx::query_as(
+      "SELECT fact_id, distance FROM fact_vec \
+       WHERE embedding MATCH ? AND k = ? AND bank_id = ?",
+    )
+    .bind(encode_embedding(query))
+    .bind(i64::try_from(k).unwrap_or(i64::MAX))
+    .bind(bank.to_string())
+    .fetch_all(pool)
+    .await
+    .map_err(|error| map_read("vector index", error))?
+  };
+
+  rows
+    .into_iter()
+    .map(|(id, distance)| {
+      let id = FactId::parse(&id)
+        .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
+      // vec0's cosine distance is `1 - cosine`; convert back to similarity.
+      let score = (1.0 - distance) as f32;
+      Ok((id, score.clamp(-1.0, 1.0)))
+    })
+    .collect()
 }
 
 /// Applies entity evidence deltas inside the caller's tx2 transaction.

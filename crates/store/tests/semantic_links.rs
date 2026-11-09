@@ -85,8 +85,8 @@ async fn insert_existing(pool: &SqlitePool, fact: &Fact) {
 
   if let Some(embedding) = fact.embedding.as_deref() {
     sqlx::query(
-      "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
-       SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+      "INSERT INTO fact_vec(rowid, fact_id, bank_id, fact_type, embedding) \
+       SELECT rowid, id, bank_id, fact_type, ? FROM fact WHERE id = ?",
     )
     .bind(blob(embedding))
     .bind(fact.id.to_string())

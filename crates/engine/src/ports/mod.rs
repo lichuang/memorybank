@@ -19,8 +19,8 @@ pub use embedder::Embedder;
 pub use llm::{JsonRequest, Llm, LlmExt};
 pub use reranker::Reranker;
 pub use store::{
-  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, Neighbor, NeighborKind, NewBinding,
-  NewChunk, NewEntity, NewFact, NewLink, NewObservation, NewOpinion, OpinionConfidenceUpdate,
-  SourceProgress, Store, WorkLists,
+  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, FactScope, Neighbor, NeighborKind,
+  NewBinding, NewChunk, NewEntity, NewFact, NewLink, NewObservation, NewOpinion,
+  OpinionConfidenceUpdate, SourceProgress, Store, WorkLists,
 };
 pub use temporal::TemporalParser;

@@ -1,7 +1,7 @@
 //! Vector search through the schema-managed sqlite-vec index.
 
-use engine::ports::Store;
-use engine::types::{BankId, FactId};
+use engine::ports::{FactScope, Store};
+use engine::types::{BankId, FactId, FactType};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use store::testing::memory_pool;
 use store::{EMBEDDING_DIM, SqliteStore};
@@ -27,16 +27,28 @@ async fn insert_fact(
   bank: BankId,
   embedding: Option<&[f32]>,
 ) -> Result<FactId, sqlx::Error> {
+  insert_fact_as(pool, bank, FactType::World, embedding).await
+}
+
+async fn insert_fact_as(
+  pool: &SqlitePool,
+  bank: BankId,
+  fact_type: FactType,
+  embedding: Option<&[f32]>,
+) -> Result<FactId, sqlx::Error> {
   let id = FactId::new();
+  let confidence = (fact_type == FactType::Opinion).then_some(0.5_f64);
 
   // fact and fact_vec are 1:1; mirror tx2's single-transaction write.
   let mut tx = pool.begin().await?;
   sqlx::query(
-    "INSERT INTO fact (id, bank_id, fact_type, text, created_at, updated_at) \
-     VALUES (?, ?, 'world', 'fact', 0, 0)",
+    "INSERT INTO fact (id, bank_id, fact_type, text, confidence, created_at, updated_at) \
+     VALUES (?, ?, ?, 'fact', ?, 0, 0)",
   )
   .bind(id.to_string())
   .bind(bank.to_string())
+  .bind(fact_type.as_str())
+  .bind(confidence)
   .execute(&mut *tx)
   .await?;
 
@@ -54,8 +66,8 @@ async fn insert_embedding(
   embedding: &[f32],
 ) -> Result<(), sqlx::Error> {
   sqlx::query(
-    "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
-     SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+    "INSERT INTO fact_vec(rowid, fact_id, bank_id, fact_type, embedding) \
+     SELECT rowid, id, bank_id, fact_type, ? FROM fact WHERE id = ?",
   )
   .bind(blob(embedding))
   .bind(id.to_string())
@@ -107,7 +119,10 @@ async fn ranks_by_cosine_and_applies_the_limit() {
     .await
     .expect("other bank");
 
-  let results = store.search_vector(bank, &query, 2).await.expect("search");
+  let results = store
+    .search_vector(bank, &query, 2, &FactScope::All)
+    .await
+    .expect("search");
 
   assert_eq!(results.len(), 2);
   assert_eq!(results[0].0, identical);
@@ -135,7 +150,10 @@ async fn equal_scores_keep_the_smaller_id() {
     .expect("insert");
   let expected = if first <= second { first } else { second };
 
-  let results = store.search_vector(bank, &query, 1).await.expect("search");
+  let results = store
+    .search_vector(bank, &query, 1, &FactScope::All)
+    .await
+    .expect("search");
 
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].0, expected, "ties are broken by the smaller id");
@@ -155,7 +173,10 @@ async fn equal_scores_are_ordered_by_fact_id() {
     .await
     .expect("insert");
 
-  let results = store.search_vector(bank, &query, 2).await.expect("search");
+  let results = store
+    .search_vector(bank, &query, 2, &FactScope::All)
+    .await
+    .expect("search");
 
   let ids: Vec<FactId> = results.iter().map(|(id, _)| *id).collect();
   let mut expected = vec![first, second];
@@ -174,7 +195,7 @@ async fn rejects_a_query_with_the_wrong_dimension() {
     .expect("insert");
 
   let error = store
-    .search_vector(bank, &[1.0, 0.0], 5)
+    .search_vector(bank, &[1.0, 0.0], 5, &FactScope::All)
     .await
     .expect_err("dimension mismatch");
 
@@ -221,8 +242,8 @@ async fn rejects_a_corrupt_embedding_blob_at_write_time() {
   .expect("insert fact");
 
   let error = sqlx::query(
-    "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
-     SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+    "INSERT INTO fact_vec(rowid, fact_id, bank_id, fact_type, embedding) \
+     SELECT rowid, id, bank_id, fact_type, ? FROM fact WHERE id = ?",
   )
   .bind(vec![1_u8, 2, 3])
   .bind(id.to_string())
@@ -253,14 +274,14 @@ async fn zero_k_and_empty_banks_return_empty() {
 
   assert!(
     store
-      .search_vector(bank, &query, 0)
+      .search_vector(bank, &query, 0, &FactScope::All)
       .await
       .expect("k=0")
       .is_empty()
   );
   assert!(
     store
-      .search_vector(BankId::new(), &query, 5)
+      .search_vector(BankId::new(), &query, 5, &FactScope::All)
       .await
       .expect("empty bank")
       .is_empty()
@@ -278,7 +299,7 @@ async fn fact_deletion_removes_its_vector_and_embeddings_can_be_replaced() {
     .await
     .expect("insert");
   let results = store
-    .search_vector(bank, &query, 1)
+    .search_vector(bank, &query, 1, &FactScope::All)
     .await
     .expect("search after insert");
   assert_eq!(results[0].0, first);
@@ -287,7 +308,7 @@ async fn fact_deletion_removes_its_vector_and_embeddings_can_be_replaced() {
     .await
     .expect("insert");
   let results = store
-    .search_vector(bank, &query, 2)
+    .search_vector(bank, &query, 2, &FactScope::All)
     .await
     .expect("search after second insert");
   let ids: Vec<FactId> = results.iter().map(|(id, _)| *id).collect();
@@ -300,7 +321,7 @@ async fn fact_deletion_removes_its_vector_and_embeddings_can_be_replaced() {
     .await
     .expect("delete fact");
   let results = store
-    .search_vector(bank, &query, 2)
+    .search_vector(bank, &query, 2, &FactScope::All)
     .await
     .expect("search after delete");
   assert_eq!(results.len(), 1);
@@ -312,10 +333,47 @@ async fn fact_deletion_removes_its_vector_and_embeddings_can_be_replaced() {
     .await
     .expect("replace embedding");
   let results = store
-    .search_vector(bank, &query, 2)
+    .search_vector(bank, &query, 2, &FactScope::All)
     .await
     .expect("search after replacement");
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].0, second);
   assert!(results[0].1.abs() < 1e-5, "score: {}", results[0].1);
+}
+
+#[tokio::test]
+async fn scopes_vector_search_to_the_target_network() {
+  let pool = memory_pool().await.expect("pool");
+  let store = SqliteStore::new(pool.clone());
+  let bank = BankId::new();
+  let query = vector(&[(0, 1.0)]);
+
+  let world = insert_fact_as(&pool, bank, FactType::World, Some(&query))
+    .await
+    .expect("world");
+  let opinion = insert_fact_as(&pool, bank, FactType::Opinion, Some(&query))
+    .await
+    .expect("opinion");
+
+  let opinions = store
+    .search_vector(bank, &query, 10, &FactScope::Types(vec![FactType::Opinion]))
+    .await
+    .expect("opinions");
+  let ids: Vec<FactId> = opinions.iter().map(|(id, _)| *id).collect();
+  assert_eq!(ids, vec![opinion]);
+
+  let all = store
+    .search_vector(bank, &query, 10, &FactScope::All)
+    .await
+    .expect("all");
+  let ids: Vec<FactId> = all.iter().map(|(id, _)| *id).collect();
+  assert_eq!(ids.len(), 2);
+  assert!(ids.contains(&world));
+  assert!(ids.contains(&opinion));
+
+  let none = store
+    .search_vector(bank, &query, 10, &FactScope::Types(Vec::new()))
+    .await
+    .expect("none");
+  assert!(none.is_empty());
 }

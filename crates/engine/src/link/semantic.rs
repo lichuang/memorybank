@@ -5,7 +5,7 @@
 //! Reciprocity is never assumed: a `B → A` row exists only if B also selects A
 //! into its own budget.
 
-use crate::ports::{NewLink, Store};
+use crate::ports::{FactScope, NewLink, Store};
 use crate::types::{BankId, Fact, LinkId, LinkType, Timestamp};
 use crate::{Error, Result};
 
@@ -105,7 +105,12 @@ pub async fn build_semantic_links(
     // `+1` keeps the budget intact if this fact is already committed and shows
     // up in its own search results (normally impossible before tx2).
     let mut candidates = store
-      .search_vector(bank, embedding, config.semantic_top_k.saturating_add(1))
+      .search_vector(
+        bank,
+        embedding,
+        config.semantic_top_k.saturating_add(1),
+        &FactScope::All,
+      )
       .await?;
 
     for (other, other_embedding) in &embedded {

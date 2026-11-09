@@ -103,6 +103,8 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>; // injectable for tests
 }
 
+pub enum FactScope { All, Types(Vec<FactType>) }
+
 #[async_trait]
 pub trait Store: Send + Sync {
     // —— Bank & inbox (schema §5.1, four stages) ——
@@ -119,10 +121,14 @@ pub trait Store: Send + Sync {
     async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;                         // tx2: all products + status=done atomically
 
     // —— Read path (schema §5.4, four channels) ——
-    async fn search_vector(&self, bank: BankId, q: &[f32], k: usize) -> Result<Vec<(FactId, f32)>>;
-    async fn search_bm25(&self, bank: BankId, q: &str, k: usize) -> Result<Vec<(FactId, f32)>>;
-    async fn neighbors(&self, bank: BankId, from: FactId) -> Result<Vec<Neighbor>>;          // fact_link + fact_entity-derived adjacency
-    async fn facts_in_range(&self, bank: BankId, range: TimeRange) -> Result<Vec<FactId>>;
+    async fn search_vector(&self, bank: BankId, q: &[f32], k: usize, scope: &FactScope)
+        -> Result<Vec<(FactId, f32)>>;
+    async fn search_bm25(&self, bank: BankId, q: &str, k: usize, scope: &FactScope)
+        -> Result<Vec<(FactId, f32)>>;
+    async fn neighbors(&self, bank: BankId, from: FactId, scope: &FactScope)
+        -> Result<Vec<Neighbor>>;                                                            // fact_link + fact_entity-derived adjacency
+    async fn facts_in_range(&self, bank: BankId, range: TimeRange, scope: &FactScope)
+        -> Result<Vec<FactId>>;
     async fn fetch_facts(&self, ids: &[FactId]) -> Result<Vec<Fact>>;
     async fn increment_access(&self, ids: &[FactId]) -> Result<()>;
 

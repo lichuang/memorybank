@@ -157,6 +157,7 @@ CREATE INDEX idx_fact_link_bank_to ON fact_link (bank_id, to_fact_id);
 CREATE VIRTUAL TABLE fact_vec USING vec0(
   fact_id TEXT,
   bank_id TEXT,
+  fact_type TEXT,
   embedding float[1536] distance_metric=cosine
 );
 

@@ -193,6 +193,8 @@ pub struct Neighbor { pub fact_id: FactId, pub kind: NeighborKind, pub weight: f
 pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
   pub co_mentioned: Vec<EntityId>, pub last_mention_at: Option<Timestamp> }
 
+pub enum FactScope { All, Types(Vec<FactType>) }
+
 #[async_trait] pub trait Store: Send+Sync {
   // bank / inbox
   async fn create_bank(&self, bank:Bank)->Result<()>;
@@ -203,10 +205,10 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
   async fn release_chunk(&self, chunk:ChunkId, claimed_at:Timestamp, now:Timestamp)->Result<()>;  // token-guarded; pending/done/failed are no-ops
   async fn commit_chunk(&self, c:ChunkCommit)->Result<()>;
   // retrieval
-  async fn search_vector(&self, bank:BankId, q:&[f32], k:usize)->Result<Vec<(FactId,f32)>>;
-  async fn search_bm25(&self, bank:BankId, q:&str, k:usize)->Result<Vec<(FactId,f32)>>;
-  async fn neighbors(&self, bank:BankId, from:FactId)->Result<Vec<Neighbor>>;
-  async fn facts_in_range(&self, bank:BankId, r:TimeRange)->Result<Vec<FactId>>;
+  async fn search_vector(&self, bank:BankId, q:&[f32], k:usize, scope:&FactScope)->Result<Vec<(FactId,f32)>>;
+  async fn search_bm25(&self, bank:BankId, q:&str, k:usize, scope:&FactScope)->Result<Vec<(FactId,f32)>>;
+  async fn neighbors(&self, bank:BankId, from:FactId, scope:&FactScope)->Result<Vec<Neighbor>>;
+  async fn facts_in_range(&self, bank:BankId, r:TimeRange, scope:&FactScope)->Result<Vec<FactId>>;
   async fn fetch_facts(&self, ids:&[FactId])->Result<Vec<Fact>>;
   async fn increment_access(&self, ids:&[FactId])->Result<()>;
   // entity / opinion / observation / maintenance
@@ -226,6 +228,7 @@ pub struct EntityCandidate { pub entity: Entity, pub variants: Vec<String>,
   - `claim_chunk` claims atomically and reclaims stale `extracting` rows (`now - updated_at > stale_after`), refreshing `updated_at = now`; returns `None` when nothing is claimable.
   - `commit_chunk` is the only transaction entry for extraction products: facts / bindings / links / entity stats / opinion updates / status→done (`completed_at`) commit together. If a listed entity hits `UNIQUE(bank_id, canonical_name)`, the store reuses the existing row and rewrites the bindings that referenced the new id.
   - `append_chunks` skips any chunk whose `(bank_id, content_hash)` already exists and returns the inserted count.
+  - Retrieval methods take a `FactScope` (`All` or a `Types` subset) so the target network semantics of paper eqs. (9)–(11) are expressed at the port; empty `Types` means no facts.
   - `neighbors` merges `fact_link` rows with adjacency derived from `fact_entity` (weight 1.0, `NeighborKind::Entity`); the pairwise closure is never materialized. Four kinds are reported because P2-3 applies a distinct `mu` per kind.
   - `insert_opinion` writes the opinion row plus its `fact_entity` bindings in one transaction; `insert_observations` appends observation rows plus bindings, never replacing an older batch.
   - `pending_work` derives all lists in-database; `update_embeddings` is the backfill write path (the engine owns the `Embedder`, so the store cannot re-embed by itself); `increment_access` batches counter bumps and leaves `updated_at` untouched.
@@ -590,7 +593,7 @@ pub struct ReinforcementConfig { pub alpha: f32, pub sim_threshold: f32, pub max
 pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
                        new_facts:&[Fact], cfg:&ReinforcementConfig)
   -> Result<Vec<OpinionConfidenceUpdate>>
-// candidates: entity overlap ∪ sim(v_o,v_f)>θ (search_vector restricted to opinions)
+// candidates: entity overlap ∪ sim(v_o,v_f)>θ (search_vector with FactScope::Types([Opinion]))
 // Assess schema: {"verdict":"reinforce|weaken|contradict|neutral","reason":"…"}
 // c' = min(c+α,1) / max(c-α,0) / max(c-2α,0) / c
 ```
@@ -716,15 +719,15 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
 
 **Status**: ❌
 
-- **Design**: implement `search_vector`: `SELECT id, embedding FROM fact WHERE bank_id=? AND embedding IS NOT NULL`, cosine in Rust, maintain a top-k min-heap; `k`/`min_cos` from configuration.
-- **Acceptance**: matches the brute-force reference implementation; NULL rows skipped.
+- **Design**: the store search already exists (vec0 exact KNN, `FactScope` scoping). P2-1 adds the recall-level channel wrapper: call `search_vector` with the target scope, apply `min_cos` from configuration, and return the ranked ids. No brute-force reimplementation.
+- **Acceptance**: respects the target `FactScope`; `min_cos` filtering; rows without embeddings are skipped.
 - **Tests**: ordering assertions on a known vector set; empty bank returns empty.
 
 ## P2-2 BM25 Channel
 
 **Status**: ❌
 
-- **Design**: `search_bm25`: split the query on whitespace/punctuation and escape terms (wrap in `"term"` quotes), `SELECT fact_id, bm25(fact_fts) AS s … JOIN fact ON … WHERE bank_id=? ORDER BY s LIMIT k`.
+- **Design**: `search_bm25` with `FactScope`: split the query on whitespace/punctuation and escape terms (wrap in `"term"` quotes), then rank `fact_fts` rows; restrict to the scope by joining `fact` on `fact_type IN (...)` (or add `fact_type UNINDEXED` to the FTS table). `WHERE bank_id=? ORDER BY s LIMIT k`.
 - **Acceptance**: CJK trigram substrings match; empty query returns empty.
 - **Tests**: proper nouns/numbers match; injection-style special characters do not error.
 
@@ -746,7 +749,7 @@ pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)], cfg:&G
 
 **Status**: ❌
 
-- **Design**: `TemporalParser.parse` → `facts_in_range` → proximity score `1 - |midDiff|/(range/2)`.
+- **Design**: `TemporalParser.parse` → `facts_in_range(..., scope)` → proximity score `1 - |midDiff|/(range/2)`.
 - **Acceptance**: no time constraint means no activation; interval endpoint semantics fixed (closed interval).
 - **Tests**: "last week" query; no results; timezone normalization to UTC.
 

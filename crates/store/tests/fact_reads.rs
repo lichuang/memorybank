@@ -1,9 +1,9 @@
 //! Occurrence-interval and fact read queries.
 
-use engine::ports::Store;
+use engine::ports::{FactScope, Store};
 use engine::testing::timestamp;
 use engine::types::{
-  BankId, ClosedInterval, FactId, OccurrenceInterval, TimeRange, to_epoch_millis,
+  BankId, ClosedInterval, FactId, FactType, OccurrenceInterval, TimeRange, to_epoch_millis,
 };
 use sqlx::SqlitePool;
 use store::testing::memory_pool;
@@ -62,6 +62,7 @@ async fn facts_in_range_matches_occurrence_intersections() {
         start: ts(-hour(1)),
         end: ts(hour(1)),
       },
+      &FactScope::All,
     )
     .await
     .expect("range");
@@ -78,6 +79,7 @@ async fn facts_in_range_matches_occurrence_intersections() {
         start: ts(hour(2)),
         end: ts(hour(3)),
       },
+      &FactScope::All,
     )
     .await
     .expect("open end");
@@ -90,6 +92,7 @@ async fn facts_in_range_matches_occurrence_intersections() {
         start: ts(0),
         end: ts(0),
       },
+      &FactScope::All,
     )
     .await
     .expect("point range");
@@ -140,8 +143,8 @@ async fn fetch_facts_round_trips_every_field() {
   .expect("insert fact");
 
   sqlx::query(
-    "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
-     SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+    "INSERT INTO fact_vec(rowid, fact_id, bank_id, fact_type, embedding) \
+     SELECT rowid, id, bank_id, fact_type, ? FROM fact WHERE id = ?",
   )
   .bind(blob(&embedding))
   .bind(id.to_string())
@@ -218,8 +221,8 @@ async fn rejects_a_corrupt_embedding_blob_at_write_time() {
   .expect("insert fact");
 
   let error = sqlx::query(
-    "INSERT INTO fact_vec(rowid, fact_id, bank_id, embedding) \
-     SELECT rowid, id, bank_id, ? FROM fact WHERE id = ?",
+    "INSERT INTO fact_vec(rowid, fact_id, bank_id, fact_type, embedding) \
+     SELECT rowid, id, bank_id, fact_type, ? FROM fact WHERE id = ?",
   )
   .bind(vec![1_u8, 2, 3])
   .bind(id.to_string())
@@ -259,8 +262,43 @@ async fn skips_rows_with_invalid_occurrence_intervals() {
         start: ts(-hour(1)),
         end: ts(hour(3)),
       },
+      &FactScope::All,
     )
     .await
     .expect("range");
   assert_eq!(ids, vec![valid], "invalid rows are filtered in SQL");
+}
+
+#[tokio::test]
+async fn facts_in_range_scopes_to_the_target_network() {
+  let pool = memory_pool().await.expect("pool");
+  let store = SqliteStore::new(pool.clone());
+  let bank = BankId::new();
+
+  let world = insert_interval(&pool, bank, Some(0), Some(hour(1))).await;
+  let opinion = insert_interval(&pool, bank, Some(0), Some(hour(1))).await;
+  sqlx::query("UPDATE fact SET fact_type = 'opinion', confidence = 0.5 WHERE id = ?")
+    .bind(opinion.to_string())
+    .execute(&pool)
+    .await
+    .expect("mark opinion");
+
+  let range = TimeRange {
+    start: ts(0),
+    end: ts(hour(1)),
+  };
+
+  let only_opinions = store
+    .facts_in_range(bank, range, &FactScope::Types(vec![FactType::Opinion]))
+    .await
+    .expect("opinions");
+  assert_eq!(only_opinions, vec![opinion]);
+
+  let all = store
+    .facts_in_range(bank, range, &FactScope::All)
+    .await
+    .expect("all");
+  assert_eq!(all.len(), 2);
+  assert!(all.contains(&world));
+  assert!(all.contains(&opinion));
 }
