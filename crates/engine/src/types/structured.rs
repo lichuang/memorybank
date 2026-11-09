@@ -35,6 +35,11 @@ pub struct ExtractedFact {
   pub why: String,
   /// Memory network this fact belongs to.
   pub fact_type: FactType,
+  /// Initial belief strength for an opinion fact (`0..=1`); `None` for
+  /// world/experience facts. The extraction pass defaults a missing/invalid
+  /// opinion confidence to `ExtractionConfig::default_opinion_confidence`.
+  #[serde(default)]
+  pub confidence: Option<f32>,
   /// Occurrence interval start in UTC, when the model can resolve it.
   pub occurred_start: Option<Timestamp>,
   /// Occurrence interval end in UTC, when the model can resolve it.
@@ -170,7 +175,7 @@ mod tests {
       .and_then(Value::as_object)
       .expect("object schema");
 
-    for name in ["what", "when", "where", "who", "why"] {
+    for name in ["what", "when", "where", "who", "why", "confidence"] {
       assert!(properties.contains_key(name), "missing property {name}");
     }
     assert!(!properties.contains_key("where_"));
@@ -220,6 +225,7 @@ mod tests {
       who: "who".into(),
       why: "why".into(),
       fact_type: FactType::World,
+      confidence: None,
       occurred_start: None,
       occurred_end: None,
       mentioned_at: None,

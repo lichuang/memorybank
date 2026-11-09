@@ -192,6 +192,7 @@ mod tests {
       who: "Emily".into(),
       why: "career growth".into(),
       fact_type: FactType::World,
+      confidence: None,
       occurred_start: None,
       occurred_end: None,
       mentioned_at: None,

@@ -75,6 +75,7 @@ mod tests {
       who: String::new(),
       why: String::new(),
       fact_type: FactType::World,
+      confidence: None,
       occurred_start: None,
       occurred_end: None,
       mentioned_at: None,

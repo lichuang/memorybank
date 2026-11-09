@@ -68,7 +68,7 @@ cargo doc --workspace --no-deps
    - update the phase progress counters at the top of `design/phase.md`.
 4. Commit message format: `P<phase>-<index>: <task name>`, e.g. `P0-2: id and time primitives`.
 5. Every task ships with tests; run phase-level integration tests plus `fmt` / `clippy` at the end of each phase.
-6. **Do not decide open design questions on your own** (listed in `design/design.md` §6 and `memory-schema.md` §7 — e.g. §7.A#2 confidence, causal normalization / relation narrowing). Ask a human first.
+6. **Do not decide open design questions on your own** (listed in `design/design.md` §6 and `memory-schema.md` §7). Ask a human first.
 7. Do not `git commit` or `git push` unless explicitly asked.
 
 ## 5. Coding standards
@@ -110,7 +110,7 @@ These are settled design decisions. Do not deviate silently:
 ## 8. Key invariants (implementation self-check)
 
 - `chunk`: `(bank_id, content_hash)` is unique; the status flip and all products commit in one transaction; a failure leaves no partial rows.
-- `fact`: observation rows have `chunk_id IS NULL`; reflect-formed opinions have `chunk_id IS NULL` and `confidence NOT NULL`.
+- `fact`: observation rows have `chunk_id IS NULL`; every opinion row has `confidence NOT NULL` while non-opinion rows have `confidence IS NULL`; reflect-formed opinions have `chunk_id IS NULL`.
 - `fact_link`: temporal edges exist only as complete pairs (no one-sided rows); semantic and causal edges are single rows.
 - `entity`: `mention_count` / `first_seen` / `last_seen` stay consistent with world/experience binding counts (maintained in the same transaction).
 

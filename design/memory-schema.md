@@ -140,7 +140,7 @@ Chunking strategy (configuration): when the caller provides session/turn metadat
 | `occurred_start` | `TS` nullable | τs, occurrence interval start |
 | `occurred_end` | `TS` nullable | τe, occurrence interval end (= start for point events; NULL = open interval; both NULL = no temporal information) |
 | `mentioned_at` | `TS` nullable | τm, the time the fact was mentioned in conversation. Used for entity-resolution temporal proximity and as the fallback time prefix when no occurrence interval is known (temporal edges use occurrence intervals, §5.5) |
-| `confidence` | `Float01` nullable | c, belief strength. See the conditional constraints below |
+| `confidence` | `Float01` nullable | c, belief strength. Required for **all** opinion rows (extraction supplies an initial estimate; missing/invalid falls back to 0.5) and forbidden for world/experience rows |
 | `access_count` | `Int` default 0 | x.access_count: incremented on recall hits; observability/tuning |
 | `attrs` | `JSON` nullable | remaining x: fact_kind, structured location, and the extraction dimensions (`when`/`where`/`who`/`why`) kept as an audit/fallback copy |
 
@@ -148,8 +148,8 @@ Engine representation: `Fact.occurred` is an `OccurrenceInterval` (`Closed(Close
 
 Conditional constraints:
 
-- `fact_type=opinion` and `chunk_id IS NULL` (reflect-produced) ⇒ `confidence` NOT NULL;
-- opinion rows produced directly by extraction (`chunk_id` set, i.e. opinions stated in conversation) ⇒ `confidence` may be NULL: the paper gives no extraction-side confidence (A.5.1 has no such field); nullable rows acquire/revise confidence through reinforcement over time (see §7);
+- `fact_type=opinion` ⇒ `confidence` NOT NULL, whether reflect-produced (`chunk_id IS NULL`) or extraction-produced (`chunk_id` set);
+- `fact_type<>opinion` ⇒ `confidence` IS NULL (the paper's c belongs to opinions only);
 - `fact_type=observation` ⇒ no chunks; observation rows have `chunk_id IS NULL`.
 
 > Note: an earlier design stored a `context` column on `fact` with per-row verbatim excerpts; this was rejected because "one chunk yields multiple facts, duplicating the source text per row". Verbatim text now lives uniformly in source/chunk (payload + slices), with `chunk_id` as the replacement.
@@ -351,7 +351,7 @@ Scheduling principle: implement what is in the paper first. Three tiers — **A 
 ### Tier A · Paper Mechanisms (first batch)
 
 1. Embedding input = stored text (already includes the human-readable time prefix), and **store the augmented full text** (one string across all paths); reranker input likewise carries time (paper §4.1.2).
-2. Convention for extraction-produced opinion rows having nullable `confidence` (paper A.5.1 has no extraction-side confidence field) — accept it, or have the extraction prompt produce an initial confidence.
+2. **Resolved**: extraction-produced opinions get an initial LLM `confidence` (0..1); a missing/invalid value falls back to 0.5; every opinion row therefore carries a belief strength, and non-opinion rows carry none.
 3. Chunking strategy: session-alignment first / window fallback / configurable window size (paper §4.1.2 coarse-grained chunking, 2–5 narrative facts per chunk).
 4. Keep `access_count` or not (paper mechanism x.access_count; write amplification vs observability).
 5. Opinion formation time τ expressed as `created_at`; add a dedicated column later if opinion revisions ever need to preserve the original formation time.

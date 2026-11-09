@@ -27,6 +27,10 @@ pub struct ExtractionConfig {
   /// Safety net in characters: longer chunk text is truncated with a warning.
   /// `0` disables truncation (chunking should already bound the size).
   pub max_input_chars: usize,
+  /// Fallback belief strength when the model omits or misstates the confidence
+  /// of an opinion fact. Must be in `[0, 1]`; out-of-range values are replaced
+  /// by `0.5`.
+  pub default_opinion_confidence: f32,
 }
 
 impl Default for ExtractionConfig {
@@ -35,6 +39,7 @@ impl Default for ExtractionConfig {
       temperature: 0.0,
       max_tokens: 4096,
       max_input_chars: 100_000,
+      default_opinion_confidence: 0.5,
     }
   }
 }
@@ -77,7 +82,11 @@ pub async fn extract_facts(
 
   let response: FactExtractionResponse = llm.complete_json(request).await?;
 
-  Ok(filter_facts(response.facts, chunk))
+  Ok(filter_facts(
+    response.facts,
+    chunk,
+    cfg.default_opinion_confidence,
+  ))
 }
 
 /// Returns a reason when a single extracted fact must be discarded.
@@ -88,13 +97,26 @@ pub async fn extract_facts(
 /// requirement between the two functions.
 ///
 /// `fact_type` is already validated by deserialization; the rest are semantic
-/// rules. An open interval (`start` only) is valid: the event is still ongoing.
+/// rules. Opinion facts require a finite `confidence` in `[0, 1]`; non-opinion
+/// facts must not carry one. An open interval (`start` only) is valid: the event
+/// is still ongoing.
 pub fn validate_extracted(fact: &ExtractedFact) -> Option<&'static str> {
   if fact.what.trim().is_empty() {
     return Some("empty `what`");
   }
   if fact.fact_type == FactType::Observation {
     return Some("observation rows are synthesized, not extracted");
+  }
+  if fact.fact_type == FactType::Opinion && fact.confidence.is_none() {
+    return Some("opinion facts require `confidence`");
+  }
+  if fact.fact_type != FactType::Opinion && fact.confidence.is_some() {
+    return Some("`confidence` is only valid on opinion facts");
+  }
+  if let Some(confidence) = fact.confidence
+    && (!confidence.is_finite() || !(0.0..=1.0).contains(&confidence))
+  {
+    return Some("`confidence` outside [0, 1]");
   }
   if let Err(error) = OccurrenceInterval::from_parts(fact.occurred_start, fact.occurred_end) {
     return Some(match error {
@@ -105,16 +127,60 @@ pub fn validate_extracted(fact: &ExtractedFact) -> Option<&'static str> {
   None
 }
 
-fn filter_facts(facts: Vec<ExtractedFact>, chunk: &Chunk) -> ExtractionReport {
+fn normalize_confidence(fact: &mut ExtractedFact, default: f32) {
+  if fact.fact_type != FactType::Opinion {
+    if fact.confidence.is_some() {
+      warn!(
+        what = %fact.what,
+        "dropping confidence from a non-opinion fact"
+      );
+      fact.confidence = None;
+    }
+    return;
+  }
+
+  let fallback = if default.is_finite() && (0.0..=1.0).contains(&default) {
+    default
+  } else {
+    0.5
+  };
+
+  match fact.confidence {
+    Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {}
+    Some(value) => {
+      warn!(
+        what = %fact.what,
+        value = %value,
+        fallback,
+        "invalid opinion confidence; using the fallback"
+      );
+      fact.confidence = Some(fallback);
+    }
+    None => {
+      warn!(
+        what = %fact.what,
+        fallback,
+        "missing opinion confidence; using the fallback"
+      );
+      fact.confidence = Some(fallback);
+    }
+  }
+}
+
+fn filter_facts(
+  facts: Vec<ExtractedFact>,
+  chunk: &Chunk,
+  default_opinion_confidence: f32,
+) -> ExtractionReport {
   let original_len = facts.len();
   let mut old_to_new: Vec<Option<usize>> = vec![None; original_len];
   let mut kept: Vec<(usize, ExtractedFact)> = Vec::with_capacity(original_len);
   let mut discarded = 0_usize;
 
   for (original_index, mut fact) in facts.into_iter().enumerate() {
-    // Normalize first so the interval validation sees the final times (filling
-    // one side from the chunk can create a reversed interval).
+    // Normalize the mention time first; occurrence bounds are never fabricated.
     normalize_time(&mut fact, chunk);
+    normalize_confidence(&mut fact, default_opinion_confidence);
 
     if let Some(reason) = validate_extracted(&fact) {
       warn!(
@@ -358,6 +424,85 @@ mod tests {
     assert_eq!(report.discarded, 1);
     assert_eq!(report.facts[0].entities.len(), 1);
     assert_eq!(report.facts[0].entities[0].text, "Emily");
+  }
+
+  fn opinion_json(what: &str, confidence: Option<f64>) -> Value {
+    let mut value = fact_json(what);
+    value["fact_type"] = json!("opinion");
+    if let Some(confidence) = confidence {
+      value["confidence"] = json!(confidence);
+    }
+    value
+  }
+
+  #[tokio::test]
+  async fn keeps_an_opinion_confidence_from_the_model() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({ "facts": [opinion_json("I like Rust", Some(0.8))] }),
+    );
+
+    let report = extract_facts(&llm, &chunk("text"), &ExtractionConfig::default())
+      .await
+      .expect("extraction");
+
+    assert_eq!(report.facts.len(), 1);
+    assert_eq!(report.facts[0].fact_type, FactType::Opinion);
+    assert_eq!(report.facts[0].confidence, Some(0.8));
+  }
+
+  #[tokio::test]
+  async fn defaults_a_missing_opinion_confidence() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({ "facts": [opinion_json("I like Rust", None)] }),
+    );
+    let cfg = ExtractionConfig {
+      default_opinion_confidence: 0.4,
+      ..ExtractionConfig::default()
+    };
+
+    let report = extract_facts(&llm, &chunk("text"), &cfg)
+      .await
+      .expect("extraction");
+
+    assert_eq!(report.facts[0].confidence, Some(0.4));
+  }
+
+  #[tokio::test]
+  async fn falls_back_for_an_invalid_opinion_confidence() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({ "facts": [opinion_json("I like Rust", Some(1.5))] }),
+    );
+
+    let report = extract_facts(&llm, &chunk("text"), &ExtractionConfig::default())
+      .await
+      .expect("extraction");
+
+    assert_eq!(report.facts[0].confidence, Some(0.5));
+  }
+
+  #[tokio::test]
+  async fn drops_confidence_from_non_opinion_facts() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({ "facts": [{
+        "what": "world fact", "when": "w", "where": "w", "who": "w", "why": "w",
+        "fact_type": "world", "confidence": 0.9
+      }] }),
+    );
+
+    let report = extract_facts(&llm, &chunk("text"), &ExtractionConfig::default())
+      .await
+      .expect("extraction");
+
+    assert_eq!(report.facts.len(), 1);
+    assert_eq!(report.facts[0].confidence, None);
   }
 
   #[tokio::test]

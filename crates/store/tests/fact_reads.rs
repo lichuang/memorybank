@@ -123,7 +123,7 @@ async fn fetch_facts_round_trips_every_field() {
   sqlx::query(
     "INSERT INTO fact (id, bank_id, fact_type, text, chunk_id, occurred_start, occurred_end, \
      mentioned_at, confidence, access_count, attrs, created_at, updated_at) \
-     VALUES (?, ?, 'world', 'a fact', NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+     VALUES (?, ?, 'opinion', 'a fact', NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
   .bind(id.to_string())
   .bind(bank.to_string())

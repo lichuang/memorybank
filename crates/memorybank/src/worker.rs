@@ -242,7 +242,7 @@ impl MemoryBank {
         chunk_id: Some(chunk.id),
         occurred,
         mentioned_at: extracted.mentioned_at,
-        confidence: None,
+        confidence: extracted.confidence,
         access_count: 0,
         attrs: fact_attrs(extracted),
         created_at: now,

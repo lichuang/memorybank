@@ -160,14 +160,27 @@ async fn enforces_fact_conditional_constraints() {
   let pool = pool().await;
   seed_bank(&pool).await;
 
-  // Reflect-produced opinion without a chunk must carry a confidence.
+  // Every opinion carries a confidence, whether reflect- or extraction-produced.
   insert_fact(&pool, "f1", "opinion", None, None)
     .await
     .expect_err("opinion without confidence");
 
   insert_fact(&pool, "f2", "opinion", None, Some(0.7))
     .await
-    .expect("opinion with confidence");
+    .expect("reflect opinion with confidence");
+
+  insert_fact(&pool, "f2b", "opinion", Some("c1"), None)
+    .await
+    .expect_err("extraction opinion without confidence");
+
+  insert_fact(&pool, "f2c", "opinion", Some("c1"), Some(0.6))
+    .await
+    .expect("extraction opinion with confidence");
+
+  // Confidence is opinion-only.
+  insert_fact(&pool, "f2d", "world", None, Some(0.5))
+    .await
+    .expect_err("non-opinion with confidence");
 
   // Observations never come from a chunk.
   insert_fact(&pool, "f3", "observation", None, None)

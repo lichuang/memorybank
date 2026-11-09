@@ -92,8 +92,9 @@ pub struct FactLink { id, bank_id, from_fact_id, to_fact_id, link_type: LinkType
 - **Design**:
 ```rust
 pub struct ExtractedFact { pub what: String, pub when: String, pub where_: String, pub who: String,
-  pub why: String, pub fact_type: FactType, pub occurred_start: Option<Timestamp>,
-  pub occurred_end: Option<Timestamp>, pub mentioned_at: Option<Timestamp>,
+  pub why: String, pub fact_type: FactType, pub confidence: Option<f32>,
+  pub occurred_start: Option<Timestamp>, pub occurred_end: Option<Timestamp>,
+  pub mentioned_at: Option<Timestamp>,
   pub entities: Vec<EntityMention>, pub causal_relations: Vec<CausalRef>, pub context: Option<String> }
 pub struct EntityMention { pub text: String, pub kind: Option<EntityKind> }
 pub struct CausalRef { pub target_fact_index: usize, pub relation: CausalRelation, pub strength: f32 }
@@ -164,7 +165,8 @@ pub struct ClaimedChunk { pub chunk: Chunk }                        // status = 
 pub struct NewFact { pub id: FactId, pub bank_id: BankId, pub fact_type: FactType,
   pub text: String, pub chunk_id: Option<ChunkId>, pub embedding: Option<Vec<f32>>,
   pub occurred: OccurrenceInterval, pub mentioned_at: Option<Timestamp>,
-  pub confidence: Option<f32>, pub attrs: Option<serde_json::Value>, pub created_at: Timestamp }
+  pub confidence: Option<f32>,  // required for opinion rows
+  pub attrs: Option<serde_json::Value>, pub created_at: Timestamp }
 pub struct NewBinding { pub bank_id: BankId, pub fact_id: FactId, pub entity_id: EntityId,
   pub mention_text: Option<String>, pub created_at: Timestamp }
 pub struct NewLink { pub id: LinkId, pub bank_id: BankId, pub from: FactId, pub to: FactId,
@@ -387,7 +389,8 @@ RETURNING *;
 - **Content**: A.1 prompt + schema + parse validation.
 - **Design**:
 ```rust
-pub struct ExtractionConfig { pub temperature: f32, pub max_tokens: u32, pub max_input_chars: usize }
+pub struct ExtractionConfig { pub temperature: f32, pub max_tokens: u32,
+  pub max_input_chars: usize, pub default_opinion_confidence: f32 }  // fallback 0.5
 pub struct ExtractionReport { pub facts: Vec<ExtractedFact>, pub discarded: usize }
 pub async fn extract_facts(llm:&dyn Llm, chunk:&Chunk, cfg:&ExtractionConfig) -> Result<ExtractionReport>
 pub fn validate_extracted(f: &ExtractedFact) -> Option<&'static str>   // reason to discard
@@ -395,11 +398,11 @@ pub fn validate_extracted(f: &ExtractedFact) -> Option<&'static str>   // reason
 //         used as the system message; user = chunk.text; schema_name = "fact_extraction"
 // schema: schema_for!(FactExtractionResponse), passed as request data
 ```
-- **Validation scope**: `fact_type` is a typed enum, so an invalid value fails deserialization of the whole response (adapter repair may fix it; otherwise `Fatal`). Per-fact checks are semantic: non-empty `what`; observation rows are rejected (they are synthesized, not extracted); empty entity mentions are dropped.
+- **Validation scope**: `fact_type` is a typed enum, so an invalid value fails deserialization of the whole response (adapter repair may fix it; otherwise `Fatal`). Per-fact checks are semantic: non-empty `what`; observation rows are rejected (they are synthesized, not extracted); empty entity mentions are dropped. Opinion facts carry an initial `confidence` (0..1); a missing or out-of-range value falls back to `default_opinion_confidence` (0.5), and non-opinion facts never carry one.
 - **Causal remapping**: model indices refer to the original `facts` array. After discarding invalid facts, surviving indices are remapped; references to dropped facts, out-of-range indices, and self-references are removed (logged).
 - **Oversized input**: chunk text above `max_input_chars` is truncated on a UTF-8 char boundary with a `tracing::warn` (0 disables the safety net; chunking should already bound the size).
-- **Acceptance**: invalid single facts are discarded and counted; causal references stay valid after filtering; call-level retry only for `Retryable`.
-- **Tests**: FakeLlm returns 3 facts with 1 bad; causal remapping across a dropped fact; self-reference removal; observation rejection; empty result; UTF-8 truncation; schema mismatch → `Fatal`; `Retryable` propagation.
+- **Acceptance**: invalid single facts are discarded and counted; causal references stay valid after filtering; opinion confidence is always present (fallback applied) and non-opinion facts have none; call-level retry only for `Retryable`.
+- **Tests**: FakeLlm returns 3 facts with 1 bad; causal remapping across a dropped fact; self-reference removal; observation rejection; empty result; UTF-8 truncation; schema mismatch → `Fatal`; `Retryable` propagation; opinion confidence kept, missing/invalid falls back, non-opinion confidence cleared.
 
 ## P1-8 Time and Augmented Text
 
@@ -579,7 +582,7 @@ pub fn causal_links(bank:BankId, extracted:&[ExtractedFact], ids:&[FactId],
 
 **Status**: ❌ (on hold — opinion update semantics under review)
 
-- **Hold reason**: confidence NULL / text rewrite / multi-fact aggregation rules are unresolved; the commit path (P1-16) still accepts `opinion_updates`, so this can be wired later without blocking the pipeline.
+- **Hold reason**: text rewrite and multi-fact aggregation rules are unresolved; the commit path (P1-16) still accepts `opinion_updates`, so this can be wired later without blocking the pipeline.
 - **Content**: candidates → Assess → confidence update.
 - **Design**:
 ```rust

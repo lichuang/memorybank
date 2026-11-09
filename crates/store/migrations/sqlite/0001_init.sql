@@ -82,8 +82,9 @@ CREATE TABLE fact (
   updated_at INTEGER NOT NULL,
   -- §3.4: observations never come from a chunk.
   CHECK (fact_type <> 'observation' OR chunk_id IS NULL),
-  -- §3.4: reflect-produced opinions (no chunk) always carry a confidence.
-  CHECK (chunk_id IS NOT NULL OR fact_type <> 'opinion' OR confidence IS NOT NULL)
+  -- Every opinion carries a belief strength; only opinions may carry one.
+  CHECK (fact_type <> 'opinion' OR confidence IS NOT NULL),
+  CHECK (fact_type = 'opinion' OR confidence IS NULL)
 );
 
 CREATE TABLE entity (

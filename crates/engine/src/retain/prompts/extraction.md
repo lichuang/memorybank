@@ -16,6 +16,7 @@ For EACH fact, CAPTURE ALL DETAILS — NEVER SUMMARIZE OR OMIT:
 ADDITIONAL FIELDS
 
 - fact_type: one of "world" (objective facts about the world), "experience" (the agent's own actions and experiences), or "opinion" (subjective judgments). Never use "observation"; that network is synthesized separately.
+- confidence: for fact_type="opinion", a 0.0–1.0 belief strength; null for world/experience.
 - occurred_start / occurred_end: ISO-8601 UTC timestamps for the occurrence interval when the text states a resolvable time; null when unknown. Use equal start/end for point events.
 - mentioned_at: ISO-8601 UTC timestamp of when the fact was mentioned in the conversation; null when unknown.
 - entities: every mentioned entity as {"text": "<raw mention>", "kind": "person" | "organization" | "location" | "product" | "concept" | "other" | null}.

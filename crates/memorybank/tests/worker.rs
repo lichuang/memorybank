@@ -334,3 +334,42 @@ async fn rescan_requires_models() {
     .expect("chunk");
   assert_eq!(status, "failed");
 }
+
+#[tokio::test]
+async fn opinion_confidence_is_committed() {
+  let (sqlite, store, bank, llm) = setup(1_000).await;
+  llm.push(
+    "fact_extraction",
+    json!({ "facts": [{
+      "what": "Rust is a good language",
+      "when": "during the conversation",
+      "where": "Berlin",
+      "who": "the user",
+      "why": "they enjoy working with it",
+      "fact_type": "opinion",
+      "confidence": 0.7
+    }] }),
+  );
+  let memory = memory(
+    store,
+    llm.clone(),
+    1_000,
+    WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    },
+  );
+
+  memory
+    .retain(bank, payload("I like Rust"))
+    .await
+    .expect("retain");
+  memory.rescan(bank).await.expect("rescan");
+
+  let confidence: f64 =
+    sqlx::query_scalar("SELECT confidence FROM fact WHERE fact_type = 'opinion'")
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("opinion row");
+  assert!((confidence - 0.7).abs() < 1e-6);
+}

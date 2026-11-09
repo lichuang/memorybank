@@ -255,7 +255,7 @@ pub struct NewFact {
   pub occurred: OccurrenceInterval,
   /// Mention time.
   pub mentioned_at: Option<Timestamp>,
-  /// Belief strength (required for reflect-formed opinions).
+  /// Belief strength c; `Some` for every opinion row, `None` otherwise.
   pub confidence: Option<f32>,
   /// Remaining auxiliary metadata (paper field `x`).
   pub attrs: Option<serde_json::Value>,

@@ -252,4 +252,4 @@ status: aggregate chunk state per source id (no progress table, no new column)
 3. First implementations of reranker / temporal parser (identity stub + rule-based parser first; model-based versions deferred).
 4. Tokenization for chunking and the budget estimator (do we reuse the embedding model's tokenizer?).
 5. Evaluation integration timing and harness shape (P5).
-6. Semantic follow-ups inherited from the schema doc: `§7.A#2` (nullable confidence on extraction-produced opinion rows vs an initial confidence).
+6. ~~Semantic follow-ups inherited from the schema doc: `§7.A#2` (nullable confidence on extraction-produced opinion rows vs an initial confidence).~~ **Resolved**: the extraction prompt produces an initial confidence (missing/invalid falls back to 0.5); every opinion row requires confidence and non-opinion rows forbid it.

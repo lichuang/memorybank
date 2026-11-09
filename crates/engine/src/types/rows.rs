@@ -75,7 +75,7 @@ pub struct Chunk {
 ///
 /// Invariants (schema §3.4):
 /// - `fact_type == Observation` implies `chunk_id == None`;
-/// - reflect-produced opinions have `chunk_id == None` and `confidence.is_some()`;
+/// - every opinion row has `confidence.is_some()`; non-opinion rows have none;
 /// - `occurred` is always a valid interval (`Closed` ordered, `Open`, or
 ///   `Unknown`); the type system rejects reversed and end-only bounds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,7 +97,7 @@ pub struct Fact {
   pub occurred: OccurrenceInterval,
   /// Mention time τm.
   pub mentioned_at: Option<Timestamp>,
-  /// Belief strength c (required for reflect-produced opinions).
+  /// Belief strength c; `Some` for every opinion row, `None` otherwise.
   pub confidence: Option<f32>,
   /// Recall hit counter.
   pub access_count: u32,
