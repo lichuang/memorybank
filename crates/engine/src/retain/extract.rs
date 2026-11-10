@@ -3,6 +3,8 @@
 //! Model calls happen outside any transaction; this module only produces
 //! proposals. Persistence is the caller's job (the chunk commit).
 
+use std::collections::HashSet;
+
 use schemars::schema_for;
 use tracing::warn;
 
@@ -51,18 +53,22 @@ pub struct ExtractionReport {
   pub facts: Vec<ExtractedFact>,
   /// Facts dropped because they failed validation.
   pub discarded: usize,
+  /// Durable first-person background snippets, normalized (trimmed, non-empty,
+  /// deduplicated). They are merge input, not stored facts (paper §5.6).
+  pub background_snippets: Vec<String>,
 }
 
-/// Extracts facts from one chunk.
+/// Extracts facts and background snippets from one chunk.
 ///
-/// Each proposal first receives a mention time from the chunk (`normalize_time`;
-/// occurrence bounds are never fabricated), then is validated fact by fact:
-/// invalid facts (empty text, observation rows, reversed or end-only occurrence
-/// intervals) are counted and dropped, and causal references are remapped to the
-/// surviving list (references to dropped facts, out-of-range indices, and
-/// self-references are removed). Transport errors (timeouts, malformed JSON,
-/// schema mismatches) propagate unchanged, so the caller can retry only
-/// [`crate::Error::Retryable`].
+/// Each fact proposal first receives a mention time from the chunk
+/// (`normalize_time`; occurrence bounds are never fabricated), then is validated
+/// fact by fact: invalid facts (empty text, observation rows, reversed or
+/// end-only occurrence intervals) are counted and dropped, and causal references
+/// are remapped to the surviving list (references to dropped facts, out-of-range
+/// indices, and self-references are removed). Background snippets are trimmed,
+/// deduplicated, and returned separately; they are merge input, not facts.
+/// Transport errors (timeouts, malformed JSON, schema mismatches) propagate
+/// unchanged, so the caller can retry only [`crate::Error::Retryable`].
 pub async fn extract_facts(
   llm: &dyn Llm,
   chunk: &Chunk,
@@ -82,11 +88,9 @@ pub async fn extract_facts(
 
   let response: FactExtractionResponse = llm.complete_json(request).await?;
 
-  Ok(filter_facts(
-    response.facts,
-    chunk,
-    cfg.default_opinion_confidence,
-  ))
+  let mut report = filter_facts(response.facts, chunk, cfg.default_opinion_confidence);
+  report.background_snippets = normalize_background_snippets(response.background_snippets);
+  Ok(report)
 }
 
 /// Returns a reason when a single extracted fact must be discarded.
@@ -224,7 +228,20 @@ fn filter_facts(
   ExtractionReport {
     facts: kept.into_iter().map(|(_, fact)| fact).collect(),
     discarded,
+    background_snippets: Vec::new(),
   }
+}
+
+/// Normalizes model-proposed background snippets: trim, drop empty entries,
+/// deduplicate, and preserve the model's order.
+fn normalize_background_snippets(snippets: Vec<String>) -> Vec<String> {
+  let mut seen = HashSet::new();
+  snippets
+    .into_iter()
+    .map(|snippet| snippet.trim().to_string())
+    .filter(|snippet| !snippet.is_empty())
+    .filter(|snippet| seen.insert(snippet.clone()))
+    .collect()
 }
 
 fn truncate_input(text: &str, max_chars: usize) -> String {
@@ -672,5 +689,46 @@ mod tests {
       report.facts[0].causal_relations.is_empty(),
       "the reference to the discarded fact is dropped"
     );
+  }
+
+  #[tokio::test]
+  async fn normalizes_background_snippets() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({
+        "facts": [],
+        "background_snippets": [
+          "  I was born in Colorado.  ",
+          "",
+          "I was born in Colorado.",
+          "I have ten years of startup experience."
+        ]
+      }),
+    );
+
+    let report = extract_facts(&llm, &chunk("text"), &ExtractionConfig::default())
+      .await
+      .expect("extraction");
+
+    assert_eq!(
+      report.background_snippets,
+      vec![
+        "I was born in Colorado.".to_string(),
+        "I have ten years of startup experience.".to_string()
+      ]
+    );
+  }
+
+  #[tokio::test]
+  async fn background_snippets_default_to_empty() {
+    let llm = FakeLlm::new();
+    llm.push("fact_extraction", json!({ "facts": [] }));
+
+    let report = extract_facts(&llm, &chunk("text"), &ExtractionConfig::default())
+      .await
+      .expect("extraction");
+
+    assert!(report.background_snippets.is_empty());
   }
 }

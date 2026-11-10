@@ -89,7 +89,7 @@ cargo doc --workspace --no-deps
 
 These are settled design decisions. Do not deviate silently:
 
-1. **Store contract**: `commit_chunk` is the only transaction entry (tx2 writes every product and flips status atomically); `claim_chunk` claims atomically and reclaims stale `extracting` rows; `neighbors()` merges `fact_link` rows with entity adjacency derived from `fact_entity`; **work lists are always derived** (no task-queue table).
+1. **Store contract**: `commit_chunk` is the only transaction entry (tx2 writes every product — including the optional A3 `bank.background` CAS — and flips status atomically); `claim_chunk` claims atomically and reclaims stale `extracting` rows; `neighbors()` merges `fact_link` rows with entity adjacency derived from `fact_entity`; **work lists are always derived** (no task-queue table).
 2. **The retrieval unit is the `fact` row**; chunk text is not part of the retrieval surface by default; write-time and query-time embeddings must use the same active model — **never compare across models**.
 3. **Edge shapes**: `temporal` undirected edges are stored as two rows (written in pairs, pruned in pairs; the canonical-key group count is always 2); `semantic` is a directed single row (per-fact top-k budget, no reciprocity implied); `causal` is a directed single row; `entity` adjacency is never materialized — it is derived from bindings.
 4. **Every table carries `bank_id` directly**; deletion and partitioning must not rely on FK cascades.
@@ -113,6 +113,7 @@ These are settled design decisions. Do not deviate silently:
 - `fact`: observation rows have `chunk_id IS NULL`; every opinion row has `confidence NOT NULL` while non-opinion rows have `confidence IS NULL`; reflect-formed opinions have `chunk_id IS NULL`.
 - `fact_link`: temporal edges exist only as complete pairs (no one-sided rows); semantic and causal edges are single rows.
 - `entity`: `mention_count` / `first_seen` / `last_seen` stay consistent with world/experience binding counts (maintained in the same transaction).
+- `bank`: a background merge is carried by `ChunkCommit::background_update`; the CAS (`expected` background) and all chunk products commit or roll back together.
 
 ## 9. Next step
 

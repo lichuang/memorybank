@@ -4,10 +4,13 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use engine::link::{LinkConfig, build_semantic_links, build_temporal_links, causal_links};
-use engine::ports::{ChunkCommit, EntityStatUpdate, NewBinding, NewChunk, NewFact, now_ts};
+use engine::ports::{
+  BackgroundUpdate, ChunkCommit, EntityStatUpdate, NewBinding, NewChunk, NewFact, now_ts,
+};
 use engine::resolve::{MentionContext, ResolveWeights, resolve};
 use engine::retain::{
-  ExtractionConfig, NormalizedPayload, chunk, embed_facts, extract_facts, fact_attrs, fact_text,
+  BackgroundConfig, ExtractionConfig, NormalizedPayload, chunk, embed_facts, extract_facts,
+  fact_attrs, fact_text, merge_background,
 };
 use engine::tokens::CharHeuristic;
 use engine::types::{BankId, Chunk, ChunkId, EntityId, Fact, FactId, OccurrenceInterval};
@@ -28,6 +31,8 @@ pub struct PipelineConfig {
   pub resolve: ResolveWeights,
   /// Embedding batch size.
   pub embedding_batch: usize,
+  /// Background merge parameters (retain step 5).
+  pub background: BackgroundConfig,
 }
 
 impl Default for PipelineConfig {
@@ -37,6 +42,7 @@ impl Default for PipelineConfig {
       links: LinkConfig::default(),
       resolve: ResolveWeights::default(),
       embedding_batch: 32,
+      background: BackgroundConfig::default(),
     }
   }
 }
@@ -308,20 +314,76 @@ impl MemoryBank {
     links.extend(causal_links(bank, &report.facts, &fact_ids, now));
 
     let new_facts: Vec<NewFact> = facts.iter().map(new_fact).collect();
-    self
-      .store
-      .commit_chunk(ChunkCommit {
-        chunk_id: chunk.id,
-        claimed_at: chunk.updated_at,
-        completed_at: now,
-        facts: new_facts,
-        entities,
-        bindings,
-        links,
-        entity_stats,
-        opinion_updates: Vec::new(),
-      })
-      .await
+    let base = ChunkCommit {
+      chunk_id: chunk.id,
+      claimed_at: chunk.updated_at,
+      completed_at: now,
+      facts: new_facts,
+      entities,
+      bindings,
+      links,
+      entity_stats,
+      opinion_updates: Vec::new(),
+      background_update: None,
+    };
+
+    if report.background_snippets.is_empty() {
+      return self.store.commit_chunk(base).await;
+    }
+
+    // A background merge conflicts when another chunk merged first. Re-read and
+    // re-run MergeLLM, then retry tx2; the chunk still owns its claim and no
+    // products were written by the rolled-back transaction.
+    let max_attempts = self.pipeline.background.max_attempts.max(1);
+    let mut attempt = 0_u8;
+    loop {
+      attempt += 1;
+
+      let current = self.store.load_bank(bank).await?;
+      let merged = merge_background(
+        llm.as_ref(),
+        &current.profile.background,
+        &report.background_snippets,
+        &self.pipeline.background,
+      )
+      .await?;
+
+      // Re-read the clock for each attempt: a concurrent merge may have written
+      // a later `updated_at`, and the retry must not regress it.
+      let committed_at = now_ts(self.clock.as_ref());
+
+      let background_update = if merged == current.profile.background {
+        None
+      } else {
+        Some(BackgroundUpdate {
+          expected: current.profile.background,
+          background: merged,
+          updated_at: committed_at,
+        })
+      };
+
+      let mut commit = base.clone();
+      commit.completed_at = committed_at;
+      commit.background_update = background_update;
+
+      match self.store.commit_chunk(commit).await {
+        Ok(()) => return Ok(()),
+        Err(Error::Conflict(entity, _)) if entity == "background" && attempt < max_attempts => {
+          warn!(
+            chunk = %chunk.id,
+            attempt,
+            "background changed concurrently; re-merging"
+          );
+          continue;
+        }
+        Err(Error::Conflict("background", message)) => {
+          return Err(Error::retryable(format!(
+            "background merge conflicted after {attempt} attempt(s): {message}"
+          )));
+        }
+        Err(error) => return Err(error),
+      }
+    }
   }
 }
 

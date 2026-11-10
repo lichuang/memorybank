@@ -16,7 +16,7 @@ pub use interval::{ClosedInterval, IntervalError, OccurrenceInterval};
 pub use profile::{BankProfile, ProfileError};
 pub use rows::{Bank, Chunk, Entity, Fact, FactEntity, FactLink, Source};
 pub use structured::{
-  Assessment, AssessmentVerdict, CausalRef, EntityMention, ExtractedFact, FactExtractionResponse,
-  ObservationDraft, ObservationResponse, OpinionDraft, ReflectResponse,
+  Assessment, AssessmentVerdict, BackgroundMergeResponse, CausalRef, EntityMention, ExtractedFact,
+  FactExtractionResponse, ObservationDraft, ObservationResponse, OpinionDraft, ReflectResponse,
 };
 pub use time::{TimeRange, Timestamp, from_epoch_millis, to_epoch_millis};

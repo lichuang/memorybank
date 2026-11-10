@@ -118,7 +118,7 @@ pub trait Store: Send + Sync {
         -> Result<Option<ClaimedChunk>>;                                                     // atomic pending→extracting claim
     async fn release_chunk(&self, chunk: ChunkId, claimed_at: Timestamp, now: Timestamp) -> Result<()>;  // token-guarded; pending idempotent
     async fn fail_chunk(&self, chunk: ChunkId, claimed_at: Timestamp, now: Timestamp) -> Result<()>;    // token-guarded dead letter
-    async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;                         // tx2: all products + status=done atomically
+    async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;                         // tx2: all products (incl. A3 background) + status=done atomically
 
     // —— Read path (schema §5.4, four channels) ——
     async fn search_vector(&self, bank: BankId, q: &[f32], k: usize, scope: &FactScope)
@@ -149,7 +149,7 @@ pub trait Store: Send + Sync {
 
 Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 
-1. **`commit_chunk` is the only transaction entry**: atomicity is guaranteed by the trait method; transaction objects never leak, so engine does not need to understand each backend's transaction API.
+1. **`commit_chunk` is the only transaction entry**: atomicity is guaranteed by the trait method; transaction objects never leak, so engine does not need to understand each backend's transaction API. The optional `background_update` (A3) rides in the same `ChunkCommit`, so a background merge and its facts cannot diverge.
 2. **IDs and time are engine-supplied** (`AGENTS.md`): the store never generates business IDs and never reads the wall clock; every creation DTO carries `id` and `created_at`, and methods that need "now" take it as a parameter.
 3. **`neighbors()` merges multiple sources inside the adapter**: `fact_link` rows + entity adjacency derived from `fact_entity` (the closure is never materialized) — criterion 3, "single source of truth". The result reports four kinds (`NeighborKind` includes `Entity`) because P2-3 applies a distinct µ per kind.
 4. **Work lists are always derived**: `pending_work` returns sources awaiting chunking, chunks pending/stale-claim, facts without a `fact_vec` row, and entities whose evidence changed (`entity.last_seen > latest observation row's created_at`). There is no task-queue table — criterion 2, "strategies live at runtime".
@@ -179,13 +179,13 @@ worker loop (required for processing, one-shot `rescan` in tests):
   claim_chunk (pending→extracting; updated_at = claim token)
              → extract (Llm, A.1/A.5.1) → resolve (Store) → embed (Embedder)
              → build links (link module) → reinforce (Assess + confidence deltas)
-             → commit_chunk (tx2, guarded by the claim token)
+             → merge background (MergeLLM, outside tx) → commit_chunk (tx2, guarded by the claim token)
   // on failure: release_chunk, back to pending (or failed per retry policy)
 rescan(): received sources → re-chunk; pending / stale-extracting chunks → re-run extraction
 status: aggregate chunk state per source id (no progress table, no new column)
 ```
 
-- All model calls (extraction/Assess/embedding) happen **outside** tx2; tx2 is pure database writes.
+- All model calls (extraction/Assess/background merge/embedding) happen **outside** tx2; tx2 is pure database writes. Background snippets are extracted in the same A.1 call, merged only when present, and the merged `bank.background` is CAS-written inside tx2 (schema A3).
 - `retain` is an **async ack** API: it returns the `SourceId` after tx1, so ack means "durably queued", not "done". Failures before the ack are returned as errors; failures after it are visible only through `retain_status` (`CompletedWithFailures` / `Failed`).
 - Chunking happens **before** the ack on purpose: the normalized turn spans are still in memory, so acking after tx1 avoids losing session alignment on a crash between tx0 and tx1.
 - A running worker is required to make progress; notifications are best-effort and the periodic sweep guarantees convergence after a lost wake-up.
@@ -245,7 +245,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 | Phase | Content | Exit criteria |
 |---|---|---|
 | **P0** | types + ports + SQLite migration (physical schema) + fakes | compiles; contract-test skeleton runnable |
-| **P1** | retain loop: inbox → chunking → extraction → tx2 → rescan | re-ingest / interruption-recovery tests all green |
+| **P1** | retain loop: inbox → chunking → extraction → background merge → tx2 → rescan | re-ingest / interruption-recovery tests all green |
 | **P2** | recall loop: four channels + RRF + rerank stub + budget | hit rate on a fixed corpus meets expectations |
 | **P3** | reflect: answer + opinion formation + reinforcement | profile modulation observable; opinions can evolve |
 | **P4** | observe + resolve/link polish | observations synthesized/reclaimed; resolution quality measurable |

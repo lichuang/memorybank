@@ -310,10 +310,12 @@ Key points:
 | A0. Receive and chunk (first two inbox stages) | caller ingests D | source(payload), chunk(text+hash, status=pending; hash conflicts skipped) | source.status→chunked |
 | A1. Retain extraction (single-chunk transaction; A2/A3 land in the same transaction) | after chunks are persisted (sync or rescan) | fact(world/experience, plus extraction-produced opinions) + fact_vec (when embedded), fact_entity, entity, fact_link | chunk.status→done; existing opinions' confidence/text |
 | A2. Opinion reinforcement | inside A1's transaction (Assess runs outside) | — | fact.confidence (c±α), possibly text |
-| A3. Background merge | biographical info encountered during retain (MergeLLM outside the transaction) | — | bank.background |
+| A3. Background merge | durable first-person snippets from the A.1 response (`MergeLLM` runs outside tx2) | — | `bank.background` via CAS, inside A1's tx2 |
 | B. Reflect opinion formation | query-driven response | fact(opinion) + fact_vec, fact_entity | — |
 | C. Observation background synthesis | entity touched by new facts (runtime scheduling: in-memory queue or periodic sweep; work list derived from state — e.g. e's latest evidence row is newer than its latest observation row) | fact(observation) + fact_vec + its full fact_entity bindings | — (append-only, no destructive replacement; old batches reclaimed by runtime GC by age/count cap; recall prefers recency) |
 | D. Programmatic direct write (undecided, not in paper) | application writes explicitly | depends on API | — |
+
+A3 never exists as a standalone transaction: the merge output is carried by `ChunkCommit::background_update` and CAS-applied (`WHERE id=? AND background=?`) before the other products, so a concurrent merge either retries or leaves both the facts and the profile untouched. The LLM call stays outside the transaction; only the write joins tx2.
 
 ### 5.4 Read Path (Recall's Four Channels) and Steps That Produce No Facts
 

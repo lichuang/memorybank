@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use engine::ports::{
-  ChunkCommit, ClaimedChunk, EntityStatUpdate, NewBinding, NewChunk, NewEntity, NewFact, NewLink,
-  OpinionConfidenceUpdate, Store,
+  BackgroundUpdate, ChunkCommit, ClaimedChunk, EntityStatUpdate, NewBinding, NewChunk, NewEntity,
+  NewFact, NewLink, OpinionConfidenceUpdate, Store,
 };
 use engine::testing::timestamp;
 use engine::types::{
@@ -39,6 +39,10 @@ async fn setup() -> (SqliteStore, BankId) {
 }
 
 async fn claimed_chunk(store: &SqliteStore, bank: BankId) -> ClaimedChunk {
+  claimed_chunk_with_hash(store, bank, "hash").await
+}
+
+async fn claimed_chunk_with_hash(store: &SqliteStore, bank: BankId, hash: &str) -> ClaimedChunk {
   let source = Source {
     id: SourceId::new(),
     bank_id: bank,
@@ -59,7 +63,7 @@ async fn claimed_chunk(store: &SqliteStore, bank: BankId) -> ClaimedChunk {
         source_id: source.id,
         chunk_index: 0,
         text: "chunk".into(),
-        content_hash: "hash".into(),
+        content_hash: hash.into(),
         time_start: None,
         time_end: None,
         created_at: ts(0),
@@ -194,6 +198,7 @@ fn full_commit(
       new_text: Some("revised opinion".into()),
       updated_at: ts(2_000),
     }],
+    background_update: None,
   };
 
   (commit, first.id, second.id, emily.id)
@@ -334,7 +339,13 @@ async fn a_failure_rolls_back_everything() {
   let claimed = claimed_chunk(&store, bank).await;
   let opinion_id = opinion(store.pool(), bank).await;
   let (mut commit, first, ..) = full_commit(bank, &claimed, opinion_id);
-  // A duplicate fact id makes the second insert fail after the entity/first fact.
+  // A duplicate fact id makes the second insert fail after the background CAS,
+  // entity, and first fact; everything must roll back.
+  commit.background_update = Some(BackgroundUpdate {
+    expected: "background".into(),
+    background: "should roll back".into(),
+    updated_at: ts(3_000),
+  });
   let duplicate = commit.facts[0].clone();
   commit.facts.push(duplicate);
 
@@ -367,6 +378,18 @@ async fn a_failure_rolls_back_everything() {
     count(store.pool(), "SELECT COUNT(*) FROM fact_fts").await,
     0
   );
+
+  let (background, updated_at): (String, i64) =
+    sqlx::query_as("SELECT background, updated_at FROM bank WHERE id = ?")
+      .bind(bank.to_string())
+      .fetch_one(store.pool())
+      .await
+      .expect("bank");
+  assert_eq!(
+    background, "background",
+    "the CAS rolled back with the chunk"
+  );
+  assert_eq!(updated_at, 0);
 
   let (confidence, text): (f64, String) =
     sqlx::query_as("SELECT confidence, text FROM fact WHERE id = ?")
@@ -442,4 +465,86 @@ async fn rewrites_bindings_and_statistics_on_an_entity_conflict() {
   .expect("entity");
   assert_eq!(count, 1);
   assert_eq!(mention_count, 1, "statistics follow the existing id");
+}
+
+#[tokio::test]
+async fn applies_a_background_merge_in_the_chunk_transaction() {
+  let (store, bank) = setup().await;
+  let claimed = claimed_chunk(&store, bank).await;
+  let opinion_id = opinion(store.pool(), bank).await;
+  let (mut commit, ..) = full_commit(bank, &claimed, opinion_id);
+  commit.background_update = Some(BackgroundUpdate {
+    expected: "background".into(),
+    background: "I am a careful engineer.".into(),
+    updated_at: ts(3_000),
+  });
+
+  store.commit_chunk(commit).await.expect("commit");
+
+  let (background, updated_at): (String, i64) =
+    sqlx::query_as("SELECT background, updated_at FROM bank WHERE id = ?")
+      .bind(bank.to_string())
+      .fetch_one(store.pool())
+      .await
+      .expect("bank");
+  assert_eq!(background, "I am a careful engineer.");
+  assert_eq!(updated_at, 3_000);
+}
+
+#[tokio::test]
+async fn a_stale_background_merge_rolls_back_the_whole_chunk() {
+  let (store, bank) = setup().await;
+
+  let first = claimed_chunk_with_hash(&store, bank, "hash-a").await;
+  let opinion_id = opinion(store.pool(), bank).await;
+  let (mut first_commit, ..) = full_commit(bank, &first, opinion_id);
+  first_commit.background_update = Some(BackgroundUpdate {
+    expected: "background".into(),
+    background: "I am a merged background.".into(),
+    updated_at: ts(3_000),
+  });
+  store
+    .commit_chunk(first_commit)
+    .await
+    .expect("first commit");
+
+  let second = claimed_chunk_with_hash(&store, bank, "hash-b").await;
+  let (mut second_commit, ..) = full_commit(bank, &second, opinion_id);
+  second_commit.background_update = Some(BackgroundUpdate {
+    expected: "background".into(),
+    background: "I am a stale merge.".into(),
+    updated_at: ts(4_000),
+  });
+
+  let error = store
+    .commit_chunk(second_commit)
+    .await
+    .expect_err("stale background");
+  assert!(
+    matches!(error, engine::Error::Conflict("background", _)),
+    "error: {error}"
+  );
+
+  let (background, updated_at): (String, i64) =
+    sqlx::query_as("SELECT background, updated_at FROM bank WHERE id = ?")
+      .bind(bank.to_string())
+      .fetch_one(store.pool())
+      .await
+      .expect("bank");
+  assert_eq!(background, "I am a merged background.");
+  assert_eq!(updated_at, 3_000);
+
+  let facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact WHERE chunk_id = ?")
+    .bind(second.chunk.id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("second facts");
+  assert_eq!(facts, 0, "the rejected transaction wrote no facts");
+
+  let status: String = sqlx::query_scalar("SELECT status FROM chunk WHERE id = ?")
+    .bind(second.chunk.id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("chunk");
+  assert_eq!(status, "extracting");
 }

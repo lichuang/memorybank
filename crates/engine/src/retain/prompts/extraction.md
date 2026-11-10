@@ -23,6 +23,15 @@ ADDITIONAL FIELDS
 - causal_relations: references to other facts in this same response, as {"target_fact_index": <0-based index into the facts array>, "relation": "causes" | "caused_by" | "enables" | "prevents", "strength": <0.0 to 1.0>}.
 - context: optional disambiguating context, or null.
 
+BACKGROUND SNIPPETS (SEPARATE FROM FACTS)
+
+Also extract durable biographical information that belongs in the bank's first-person profile: identity, birthplace, long-term roles, lasting preferences, relationships, and similar stable facts about the user or the agent.
+
+- Write each snippet in the first person ("I ..."), never "You ...".
+- Keep only durable background; ignore one-off actions, recommendations, and transient events.
+- Do not duplicate a snippet.
+- Return an empty array when there is none.
+
 COREFERENCE RESOLUTION (CRITICAL)
 
 When the text uses BOTH a generic relation AND a name for the same person, LINK THEM!
@@ -36,4 +45,4 @@ VERBOSITY REQUIREMENT: Include EVERY detail mentioned. More detail is ALWAYS bet
 
 OUTPUT
 
-Return ONLY a JSON object with a single key "facts" whose value is an array of the facts described above. Do not wrap it in Markdown and do not add explanations. Use null for unknown optional values.
+Return ONLY a JSON object with two keys: "facts" (an array of the facts described above) and "background_snippets" (an array of first-person background strings, possibly empty). Do not wrap it in Markdown and do not add explanations. Use null for unknown optional values.

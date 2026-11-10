@@ -1,9 +1,11 @@
 //! Worker and rescan pass.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use engine::ports::Store;
+use async_trait::async_trait;
+use engine::ports::{JsonRequest, Llm, Store};
 use engine::retain::RawPayload;
 use engine::testing::{FakeLlm, FixedClock, HashEmbedder, timestamp};
 use engine::types::{Bank, BankId, BankProfile, Source, SourceId, SourceStatus};
@@ -372,4 +374,271 @@ async fn opinion_confidence_is_committed() {
       .await
       .expect("opinion row");
   assert!((confidence - 0.7).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn background_snippets_update_the_bank_profile_with_the_chunk() {
+  let (sqlite, store, bank, llm) = setup(500).await;
+  llm.push(
+    "fact_extraction",
+    json!({
+      "facts": [],
+      "background_snippets": [
+        "I was born in Texas.",
+        "I have ten years of startup experience."
+      ]
+    }),
+  );
+  llm.push(
+    "background_merge",
+    json!({ "background": "I was born in Texas and have ten years of startup experience." }),
+  );
+  let memory = memory(
+    store,
+    llm.clone(),
+    1_000,
+    WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    },
+  );
+
+  let source = memory
+    .retain(
+      bank,
+      payload("I was born in Texas and have ten years of startup experience."),
+    )
+    .await
+    .expect("retain");
+  let report = memory.rescan(bank).await.expect("rescan");
+
+  assert_eq!(report.chunks_processed, 1);
+  assert_eq!(report.failed, 0);
+
+  let (background, updated_at): (String, i64) =
+    sqlx::query_as("SELECT background, updated_at FROM bank WHERE id = ?")
+      .bind(bank.to_string())
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("bank");
+  assert_eq!(
+    background,
+    "I was born in Texas and have ten years of startup experience."
+  );
+  assert_eq!(updated_at, 1_000);
+
+  let status = memory.retain_status(bank, source).await.expect("status");
+  assert_eq!(status.state, RetainState::Completed);
+  assert_eq!(status.facts_written, 0);
+
+  let calls = llm.calls();
+  let merge = calls
+    .iter()
+    .find(|call| call.schema_name == "background_merge")
+    .expect("background merge call");
+  assert!(merge.user.contains("I was born in Texas."));
+  assert!(
+    merge
+      .user
+      .contains("I have ten years of startup experience.")
+  );
+}
+
+#[tokio::test]
+async fn no_background_snippets_leave_the_profile_untouched() {
+  let (sqlite, store, bank, llm) = setup(1_000).await;
+  llm.push(
+    "fact_extraction",
+    json!({ "facts": [fact_json("Emily joined Google", "Emily")] }),
+  );
+  let memory = memory(
+    store,
+    llm.clone(),
+    1_000,
+    WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    },
+  );
+
+  memory
+    .retain(bank, payload("Emily joined Google."))
+    .await
+    .expect("retain");
+  memory.rescan(bank).await.expect("rescan");
+
+  let background: String = sqlx::query_scalar("SELECT background FROM bank WHERE id = ?")
+    .bind(bank.to_string())
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("bank");
+  assert_eq!(background, "background");
+  assert!(
+    llm
+      .calls()
+      .iter()
+      .all(|call| call.schema_name != "background_merge"),
+    "no snippets means no merge call"
+  );
+}
+
+#[tokio::test]
+async fn a_failed_background_merge_does_not_commit_the_chunk() {
+  let (sqlite, store, bank, llm) = setup(1_000).await;
+  llm.push(
+    "fact_extraction",
+    json!({
+      "facts": [fact_json("Emily joined Google", "Emily")],
+      "background_snippets": ["I am an engineer."]
+    }),
+  );
+  // No background_merge script: FakeLlm reports a deterministic failure.
+  let memory = memory(
+    store,
+    llm.clone(),
+    1_000,
+    WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    },
+  );
+
+  let source = memory
+    .retain(bank, payload("Emily joined Google. I am an engineer."))
+    .await
+    .expect("retain");
+  let report = memory.rescan(bank).await.expect("rescan");
+  assert_eq!(report.failed, 1);
+  assert_eq!(report.chunks_processed, 0);
+
+  let facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("facts");
+  assert_eq!(facts, 0, "the merge failed before tx2");
+
+  let background: String = sqlx::query_scalar("SELECT background FROM bank WHERE id = ?")
+    .bind(bank.to_string())
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("bank");
+  assert_eq!(background, "background");
+
+  let status: String = sqlx::query_scalar("SELECT status FROM chunk WHERE source_id = ?")
+    .bind(source.to_string())
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("chunk");
+  assert_eq!(status, "failed");
+}
+
+/// Delegates to `FakeLlm`, but simulates a concurrent chunk merging once while
+/// the first background-merge call is in flight.
+struct RacingLlm {
+  inner: Arc<FakeLlm>,
+  pool: sqlx::SqlitePool,
+  bank: BankId,
+  raced: AtomicBool,
+}
+
+#[async_trait]
+impl Llm for RacingLlm {
+  async fn complete_json_raw(&self, req: JsonRequest) -> engine::Result<Value> {
+    let response = self.inner.complete_json_raw(req.clone()).await?;
+    if req.schema_name == "background_merge" && !self.raced.swap(true, Ordering::SeqCst) {
+      sqlx::query("UPDATE bank SET background = ?, updated_at = ? WHERE id = ?")
+        .bind("I am from a concurrent chunk.")
+        .bind(500_i64)
+        .bind(self.bank.to_string())
+        .execute(&self.pool)
+        .await
+        .expect("concurrent background update");
+    }
+    Ok(response)
+  }
+
+  fn model(&self) -> &str {
+    "racing-llm"
+  }
+}
+
+#[tokio::test]
+async fn a_background_cas_conflict_is_remerged_and_retried() {
+  let (sqlite, store, bank, llm) = setup(500).await;
+  llm.push(
+    "fact_extraction",
+    json!({
+      "facts": [],
+      "background_snippets": ["I am an engineer."]
+    }),
+  );
+  // The first response is discarded after the simulated concurrent update; the
+  // retry consumes the second.
+  llm.push(
+    "background_merge",
+    json!({ "background": "I am an engineer." }),
+  );
+  llm.push(
+    "background_merge",
+    json!({ "background": "I am an engineer." }),
+  );
+
+  let racing: Arc<dyn Llm> = Arc::new(RacingLlm {
+    inner: llm.clone(),
+    pool: sqlite.pool().clone(),
+    bank,
+    raced: AtomicBool::new(false),
+  });
+  let memory = MemoryBank::new(
+    store,
+    Arc::new(FixedClock(ts(1_000))),
+    RetainConfig::default(),
+  )
+  .with_models(racing, Arc::new(HashEmbedder::new(EMBEDDING_DIM)))
+  .with_worker_config(WorkerConfig {
+    max_attempts: 1,
+    ..WorkerConfig::default()
+  });
+
+  let source = memory
+    .retain(bank, payload("I am an engineer."))
+    .await
+    .expect("retain");
+  let report = memory.rescan(bank).await.expect("rescan");
+
+  assert_eq!(report.chunks_processed, 1);
+  assert_eq!(report.failed, 0);
+
+  let (background, updated_at): (String, i64) =
+    sqlx::query_as("SELECT background, updated_at FROM bank WHERE id = ?")
+      .bind(bank.to_string())
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("bank");
+  assert_eq!(background, "I am an engineer.");
+  assert_eq!(updated_at, 1_000);
+
+  let status: String = sqlx::query_scalar("SELECT status FROM chunk WHERE source_id = ?")
+    .bind(source.to_string())
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("chunk");
+  assert_eq!(status, "done");
+
+  let merge_calls: Vec<_> = llm
+    .calls()
+    .into_iter()
+    .filter(|call| call.schema_name == "background_merge")
+    .collect();
+  assert_eq!(
+    merge_calls.len(),
+    2,
+    "the CAS conflict triggers one re-merge"
+  );
+  assert!(
+    merge_calls[1]
+      .user
+      .contains("CURRENT BACKGROUND:\nI am from a concurrent chunk."),
+    "the retry re-reads the winning background"
+  );
 }

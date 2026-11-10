@@ -951,6 +951,28 @@ async fn commit_chunk_tx(tx: &mut Transaction<'_, Sqlite>, commit: &ChunkCommit)
   let bank = BankId::parse(&bank)
     .map_err(|error| Error::fatal(format!("corrupt bank id `{bank}`: {error}")))?;
 
+  // 0. A3 background merge. The CAS runs before any product so a concurrent
+  // merge conflicts without half-writing the chunk; a stale token rolls the
+  // whole transaction back.
+  if let Some(update) = &commit.background_update {
+    let changed =
+      sqlx::query("UPDATE bank SET background = ?, updated_at = ? WHERE id = ? AND background = ?")
+        .bind(&update.background)
+        .bind(to_epoch_millis(update.updated_at))
+        .bind(bank.to_string())
+        .bind(&update.expected)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| map_write("bank", error))?;
+
+    if changed.rows_affected() == 0 {
+      return Err(Error::conflict(
+        "background",
+        format!("bank {bank} background changed before commit"),
+      ));
+    }
+  }
+
   // 1. Entities. A canonical-name conflict reuses the existing row and rewrites
   // the ids referenced by this commit (bindings + statistics).
   let mut remap: HashMap<EntityId, EntityId> = HashMap::new();

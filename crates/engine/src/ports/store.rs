@@ -81,8 +81,8 @@ pub trait Store: Send + Sync {
   async fn fail_chunk(&self, chunk: ChunkId, claimed_at: Timestamp, now: Timestamp) -> Result<()>;
 
   /// The only transaction entry for extraction products (tx2): facts, entity
-  /// bindings, links, entity statistics, and opinion updates are written
-  /// together with the chunk status flip to `done`.
+  /// bindings, links, entity statistics, opinion updates, and the optional A3
+  /// background CAS are written together with the chunk status flip to `done`.
   async fn commit_chunk(&self, commit: ChunkCommit) -> Result<()>;
 
   // —— Retrieval ——
@@ -338,6 +338,21 @@ pub struct OpinionConfidenceUpdate {
   pub updated_at: Timestamp,
 }
 
+/// A retain-time background merge (schema A3), applied by the chunk transaction.
+///
+/// `expected` is the background read before the merge and doubles as the CAS
+/// token: if another chunk merged first, the update matches no row, the whole
+/// transaction rolls back, and the worker retries with a fresh read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundUpdate {
+  /// Background observed before the merge.
+  pub expected: String,
+  /// Merged background to persist.
+  pub background: String,
+  /// When the bank row is updated.
+  pub updated_at: Timestamp,
+}
+
 /// Everything written by the chunk transaction (tx2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkCommit {
@@ -364,6 +379,10 @@ pub struct ChunkCommit {
   pub entity_stats: Vec<EntityStatUpdate>,
   /// Opinion reinforcements/weakenings.
   pub opinion_updates: Vec<OpinionConfidenceUpdate>,
+  /// Optional A3 background merge. The store applies this CAS before the other
+  /// products; a stale `expected` rolls the whole transaction back with
+  /// [`crate::Error::Conflict`].
+  pub background_update: Option<BackgroundUpdate>,
 }
 
 /// An opinion row plus its entity bindings, written atomically.
@@ -741,6 +760,11 @@ mod tests {
         new_text: None,
         updated_at: now,
       }],
+      background_update: Some(BackgroundUpdate {
+        expected: "old background".into(),
+        background: "new background".into(),
+        updated_at: now,
+      }),
     };
 
     let encoded = serde_json::to_string(&commit).expect("serialize commit");

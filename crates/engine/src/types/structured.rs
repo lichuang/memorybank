@@ -84,6 +84,17 @@ pub struct CausalRef {
 pub struct FactExtractionResponse {
   /// Facts proposed for the chunk; required even when empty.
   pub facts: Vec<ExtractedFact>,
+  /// Durable first-person background snippets found in the chunk (paper §5.6
+  /// A3 input). Optional in the response and empty when nothing qualifies.
+  #[serde(default)]
+  pub background_snippets: Vec<String>,
+}
+
+/// Merge result for the bank background (paper eq. 27).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct BackgroundMergeResponse {
+  /// The complete revised background, already in first person.
+  pub background: String,
 }
 
 /// One opinion proposed by reflection or opinion formation (paper A.2).
@@ -209,6 +220,7 @@ mod tests {
       serde_json::from_str(EXTRACTION_FIXTURE).expect("deserialize fixture");
 
     assert_eq!(response.facts.len(), 1);
+    assert!(response.background_snippets.is_empty());
     let fact = &response.facts[0];
     assert!(fact.entities.is_empty());
     assert!(fact.causal_relations.is_empty());
@@ -244,6 +256,27 @@ mod tests {
     let encoded = serde_json::to_value(&fact).expect("serialize fact");
     assert_eq!(encoded.get("where"), Some(&json!("Berlin")));
     assert!(encoded.get("where_").is_none());
+  }
+
+  #[test]
+  fn background_snippets_are_optional_in_the_extraction_schema() {
+    let schema =
+      serde_json::to_value(schemars::schema_for!(FactExtractionResponse)).expect("schema json");
+    let properties = schema
+      .get("properties")
+      .and_then(Value::as_object)
+      .expect("object schema");
+    assert!(properties.contains_key("background_snippets"));
+
+    let required = schema
+      .get("required")
+      .and_then(Value::as_array)
+      .expect("required fields")
+      .iter()
+      .filter_map(Value::as_str)
+      .collect::<Vec<_>>();
+    assert!(required.contains(&"facts"));
+    assert!(!required.contains(&"background_snippets"));
   }
 
   #[test]

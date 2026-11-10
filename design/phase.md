@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 17/19 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (29/67 total)**
+> Current progress: **P0 12/12 · P1 18/20 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (30/68 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -176,10 +176,13 @@ pub struct EntityStatUpdate { pub entity_id: EntityId, pub add: bool, pub at: Op
   pub updated_at: Timestamp }
 pub struct OpinionConfidenceUpdate { pub opinion_id: FactId, pub new_confidence: f32,
   pub new_text: Option<String>, pub updated_at: Timestamp }
+pub struct BackgroundUpdate { pub expected: String, pub background: String,
+  pub updated_at: Timestamp }
 pub struct ChunkCommit { pub chunk_id: ChunkId, pub claimed_at: Timestamp, pub completed_at: Timestamp,
   pub facts: Vec<NewFact>, pub entities: Vec<Entity>, pub bindings: Vec<NewBinding>,
   pub links: Vec<NewLink>, pub entity_stats: Vec<EntityStatUpdate>,
-  pub opinion_updates: Vec<OpinionConfidenceUpdate> }
+  pub opinion_updates: Vec<OpinionConfidenceUpdate>,
+  pub background_update: Option<BackgroundUpdate> }
 pub struct NewOpinion { pub id: FactId, pub bank_id: BankId, pub text: String,
   pub confidence: f32, pub entities: Vec<(EntityId, Option<String>)>,
   pub embedding: Option<Vec<f32>>, pub created_at: Timestamp }
@@ -226,7 +229,7 @@ pub enum FactScope { All, Types(Vec<FactType>) }
 - **Key semantics** (documented in trait doc comments):
   - **IDs and time are engine-supplied** (`AGENTS.md`): the store never generates business IDs and never reads the wall clock; every creation DTO carries `id` and `created_at`.
   - `claim_chunk` claims atomically and reclaims stale `extracting` rows (`now - updated_at > stale_after`), refreshing `updated_at = now`; returns `None` when nothing is claimable.
-  - `commit_chunk` is the only transaction entry for extraction products: facts / bindings / links / entity stats / opinion updates / status→done (`completed_at`) commit together. If a listed entity hits `UNIQUE(bank_id, canonical_name)`, the store reuses the existing row and rewrites the bindings that referenced the new id.
+  - `commit_chunk` is the only transaction entry for extraction products: facts / bindings / links / entity stats / opinion updates / the optional `bank.background` CAS / status→done (`completed_at`) commit together. If a listed entity hits `UNIQUE(bank_id, canonical_name)`, the store reuses the existing row and rewrites the bindings that referenced the new id.
   - `append_chunks` skips any chunk whose `(bank_id, content_hash)` already exists and returns the inserted count.
   - Retrieval methods take a `FactScope` (`All` or a `Types` subset) so the target network semantics of paper eqs. (9)–(11) are expressed at the port; empty `Types` means no facts.
   - `neighbors` merges `fact_link` rows with adjacency derived from `fact_entity` (weight 1.0, `NeighborKind::Entity`); the pairwise closure is never materialized. Four kinds are reported because P2-3 applies a distinct `mu` per kind.
@@ -606,8 +609,12 @@ pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
 
 - **Content**: commit every product in one transaction, guarded by the claim token.
 - **Design**: the bank is resolved from the chunk row (the DTO carries none). Insert order:
-  `entity` → `fact` (+ `fact_vec` when an embedding is present) → `fact_entity` → `fact_link`
-  → `fact_fts` → entity statistics → opinion updates. Entity rows use
+  background CAS (when `background_update` is present) → `entity` → `fact` (+ `fact_vec` when an
+  embedding is present) → `fact_entity` → `fact_link` → `fact_fts` → entity statistics → opinion
+  updates. The background CAS is
+  `UPDATE bank SET background=?, updated_at=? WHERE id=? AND background=?`; 0 rows means another
+  chunk merged first, so the transaction rolls back with `Error::Conflict("background", …)` and
+  the worker re-merges. Entity rows use
   `ON CONFLICT(bank_id, canonical_name) DO NOTHING`; when a canonical-name conflict reuses an
   existing id, the commit rewrites the ids in its bindings and statistic deltas before writing
   them. Finally, flip `chunk.status='done'` with
@@ -667,7 +674,7 @@ pub enum RetainState { Received, Queued, Running, Stalled, Completed,
 pub struct WorkerConfig { pub concurrency: usize, pub poll_interval: Duration,
   pub stale_after: Duration, pub max_attempts: u32, pub retry_delay: Duration }
 pub struct PipelineConfig { pub extraction: ExtractionConfig, pub links: LinkConfig,
-  pub resolve: ResolveWeights, pub embedding_batch: usize }
+  pub resolve: ResolveWeights, pub embedding_batch: usize, pub background: BackgroundConfig }
 impl MemoryBank {
   pub fn with_models(llm: Arc<dyn Llm>, embedder: Arc<dyn Embedder>) -> Self;
   pub fn with_pipeline(cfg: PipelineConfig) -> Self;
@@ -681,7 +688,10 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
   `rescan` reads `pending_work`, re-chunks `received` sources from `payload_text` (window
   fallback; spans are not persisted), then loops `claim_chunk` over pending/stale rows. Each
   chunk runs `extract_facts → resolve → embed_facts → temporal/semantic links → causal_links →
-  commit_chunk` (opinion updates stay empty while P1-15 is on hold). Failures return the chunk
+  load bank + merge_background (LLM) → commit_chunk` (opinion updates stay empty while P1-15 is
+  on hold). The merge result rides in `ChunkCommit::background_update`, so A3 commits atomically
+  with the chunk; a stale background CAS is retried with a fresh read, and an exhausted retry
+  budget returns `Retryable`. Failures return the chunk
   to `pending`; attempts are counted in memory and, at `max_attempts`, the chunk is
   dead-lettered via `fail_chunk`. A `Conflict` from the claim-token CAS means another worker
   owns the chunk and is left untouched. `concurrency` is reserved (the pass is sequential);
@@ -709,7 +719,48 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
   - interrupted extraction → rescan recovers; tx2 failure → no partial state;
   - stale claim reclaimed without double-committing (claim-token CAS);
   - two-row invariant (SQL asserts count=2); entity statistics match bindings;
-  - `CompletedWithFailures` when a chunk is dead-lettered.
+  - `CompletedWithFailures` when a chunk is dead-lettered;
+  - background snippets update `bank.background` atomically with the chunk; a stale CAS leaves
+    no facts and no background change.
+
+## P1-20 Background Merging
+
+**Status**: ✅ (2026-11-10)
+
+- **Content**: retain step 5 (paper §5.6/§6.1): `h' = MergeLLM(h, h_new)` — extract durable
+  first-person background snippets in A.1, merge them with the bank profile, and persist the
+  result atomically with the chunk.
+- **Design**:
+  - A.1 response gains `background_snippets: Vec<String>` (`#[serde(default)]`); the extraction
+    prompt asks for durable first-person biographical facts and an empty list when none exist.
+    `ExtractionReport` carries the normalized snippets (trimmed, empty/deduped, order preserved).
+  - `retain/background.rs`:
+    ```rust
+    pub struct BackgroundConfig { pub temperature:f32, pub max_tokens:u32,
+                                  pub max_chars:usize, pub max_attempts:u8 }
+    pub async fn merge_background(llm:&dyn Llm, current:&str, snippets:&[String],
+                                  cfg:&BackgroundConfig) -> Result<String>;
+    ```
+    A dedicated prompt (paper §5.6 rules: new information wins direct conflicts, append
+    non-conflicting details, keep first person, stay concise) returns
+    `BackgroundMergeResponse { background: String }`. Empty output or output over `max_chars`
+    is `Fatal`.
+  - `Store::ChunkCommit` gains `background_update: Option<BackgroundUpdate>` with
+    `expected`/`background`/`updated_at`. `commit_chunk_tx` applies the CAS **before** products;
+    0 rows ⇒ `Error::Conflict("background", …)` and the whole tx rolls back. There is no
+    standalone `update_bank_background` method: A3 must share tx2 with the chunk, and a second
+    transaction entry would break that atomicity.
+  - Worker: after links, when snippets exist, `load_bank` → `merge_background` (outside tx) →
+    `commit_chunk`; no snippets ⇒ `background_update=None` and no LLM call. A background CAS
+    conflict reloads, re-merges, and retries up to `max_attempts`; exhaustion returns
+    `Retryable` so the chunk returns to `pending`. A chunk-claim conflict is never retried as a
+    background conflict.
+- **Acceptance**: snippets produce a coherent first-person `bank.background` in the same
+  transaction as the chunk; empty snippets leave it untouched; a stale CAS writes neither facts
+  nor background; merge failure fails the chunk before tx2 (no partial products).
+- **Tests**: extraction snippet normalization/schema default; merge prompt and conflict rules
+  via `FakeLlm`; CAS apply + stale rollback; worker update + no-snippet skip + retry budget;
+  `max_chars` validation.
 
 ---
 
