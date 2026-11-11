@@ -435,27 +435,29 @@ pub fn fact_attrs(extracted:&ExtractedFact) -> Option<serde_json::Value>  // str
 
 ## P1-9 Entity Resolution ρ
 
-**Status**: ✅ (2026-10-29)
+**Status**: ✅ (2026-10-29; tx2 creation boundary fixed 2026-11-10)
 
-- **Content**: exact hit → three-feature fuzzy match → ensure_entity.
+- **Content**: exact hit → three-feature fuzzy match → a new-entity proposal that tx2 inserts.
 - **Design**:
 ```rust
 pub struct ResolveWeights { pub alpha: f32, pub beta: f32, pub gamma: f32,
   pub threshold: f32, pub temporal_scale: Duration, pub candidate_limit: usize }
 // defaults: 0.6 / 0.2 / 0.2 / 0.75 / 30 days / 500
 pub struct MentionContext { pub co_mentioned: Vec<EntityId>, pub at: Option<Timestamp> }
+pub struct ResolvedEntity { pub id: EntityId, pub new_entity: Option<NewEntity> }
 pub async fn resolve(store:&dyn Store, bank:BankId, mention:&EntityMention,
-                     ctx:&MentionContext, w:&ResolveWeights, now:Timestamp) -> Result<EntityId>
+                     ctx:&MentionContext, w:&ResolveWeights, now:Timestamp,
+                     pending:&[NewEntity]) -> Result<ResolvedEntity>
 pub fn normalize_name(s:&str)->String                 // lowercase, trim, collapse whitespace
 pub fn string_sim(a:&str,b:&str)->f32                 // 1 - levenshtein / max_len (chars)
 pub fn cooccurrence_sim(cand:&EntityCandidate, ctx:&MentionContext)->f32  // overlap coefficient
 pub fn temporal_sim(cand:&EntityCandidate, at:Option<Timestamp>, scale:Duration)->f32 // exp(-Δt/scale)
 ```
-- **Candidate shortlist** (`Store::entity_candidates(bank, mention, limit)`): exact canonical-name and `mention_text` variant matches first, then the bank's top entities by `mention_count`, capped at `limit`. `EntityCandidate.co_mentioned` is a bounded sample of entities sharing a fact with the candidate (fact ids are UUIDv7, so recent-first). Fuzzy scoring runs on this shortlist; `sim_str` takes the best score over the canonical name and all variants.
+- **Candidate shortlist** (`Store::entity_candidates(bank, mention, limit)`): exact canonical-name and `mention_text` variant matches first, then the bank's top entities by `mention_count`, capped at `limit`. `EntityCandidate.co_mentioned` is a bounded sample of entities sharing a fact with the candidate (fact ids are UUIDv7, so recent-first). Fuzzy scoring runs on this shortlist; `sim_str` takes the best score over the canonical name and all variants. Proposals from earlier mentions in the same chunk (`pending`) are appended as zero-evidence candidates, so exact/fuzzy matching cannot split one name into several proposals.
 - **Scoring**: weighted sum over **available** features, divided by the sum of their weights (a missing co-occurrence/temporal signal does not depress the score). Empty mention after normalization → `Error::Config`.
-- **Creation**: below the threshold → `ensure_entity(NewEntity)`; `INSERT … ON CONFLICT(bank_id, canonical_name) DO NOTHING` plus a read-back makes concurrent creation return one row. `entity_type = mention.kind.unwrap_or(Other)`; `created_at = now` (the only clock use).
-- **Acceptance**: the same mention always resolves to the same entity; creation conflicts fall back to `ensure_entity`'s UNIQUE; empty mention rejected.
-- **Tests**: exact/fuzzy-typo/threshold/new-entity paths; variant and co-mention candidates; candidate ordering and limit; empty mention; concurrent creation of the same name yields one row.
+- **Creation**: below the threshold → `ResolvedEntity { id, new_entity: Some(NewEntity) }`; **nothing is written**. `entity_type = mention.kind.unwrap_or(Other)`; `created_at = now` (the only clock use). The worker puts proposals into `ChunkCommit.entities`; tx2 inserts them with `ON CONFLICT(bank_id, canonical_name) DO NOTHING`, and a conflict remaps the proposer's bindings/statistics to the winning row.
+- **Acceptance**: `resolve` performs no writes; entity rows are created only in tx2; the same mention always resolves to the same entity; concurrent creation of one name converges through the tx2 conflict path; empty mention rejected.
+- **Tests**: exact/fuzzy-typo/threshold/new-entity proposal paths; pending exact/fuzzy reuse; variant and co-mention candidates; candidate ordering and limit; empty mention; no entity row before tx2; concurrent resolution of an existing name is stable.
 
 ## P1-10 Entity Statistics
 
@@ -611,7 +613,8 @@ pub async fn reinforce(store:&dyn Store, llm:&dyn Llm, bank:BankId,
 - **Design**: the bank is resolved from the chunk row (the DTO carries none). Insert order:
   background CAS (when `background_update` is present) → `entity` → `fact` (+ `fact_vec` when an
   embedding is present) → `fact_entity` → `fact_link` → `fact_fts` → entity statistics → opinion
-  updates. The background CAS is
+  updates. In retain, entity rows are **created here and only here**: `resolve` returns proposals,
+  and a failed chunk must leave no entity orphans. The background CAS is
   `UPDATE bank SET background=?, updated_at=? WHERE id=? AND background=?`; 0 rows means another
   chunk merged first, so the transaction rolls back with `Error::Conflict("background", …)` and
   the worker re-merges. Entity rows use
@@ -721,7 +724,9 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
   - two-row invariant (SQL asserts count=2); entity statistics match bindings;
   - `CompletedWithFailures` when a chunk is dead-lettered;
   - background snippets update `bank.background` atomically with the chunk; a stale CAS leaves
-    no facts and no background change.
+    no facts and no background change;
+  - a failure after resolution (e.g. background merge) leaves zero `entity` rows: proposals
+    never write before tx2.
 
 ## P1-20 Background Merging
 

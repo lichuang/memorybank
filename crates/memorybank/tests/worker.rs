@@ -517,6 +517,12 @@ async fn a_failed_background_merge_does_not_commit_the_chunk() {
     .expect("facts");
   assert_eq!(facts, 0, "the merge failed before tx2");
 
+  let entities: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("entities");
+  assert_eq!(entities, 0, "resolution proposals stay in memory until tx2");
+
   let background: String = sqlx::query_scalar("SELECT background FROM bank WHERE id = ?")
     .bind(bank.to_string())
     .fetch_one(sqlite.pool())

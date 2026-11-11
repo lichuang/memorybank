@@ -212,7 +212,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 ### 2.5 resolve (Entity Resolution)
 
 - Normalize the mention → exact hit on `entity.canonical_name` (index lookup); on miss, use the three-feature ρ (string / co-occurrence / temporal); variants are derived from `fact_entity.mention_text` (cached in memory per call, no cache table).
-- Persist: `upsert_entity` (reuse on UNIQUE conflict) + binding rows + entity statistics deltas (mention_count / first_seen / last_seen, same transaction).
+- Resolution is read-only: a miss returns `ResolvedEntity { id, new_entity: Some(..) }`, and proposals from earlier mentions in the chunk join the candidate set. Entity rows are inserted only by `commit_chunk` (tx2), together with bindings and statistics; a `UNIQUE(bank_id, canonical_name)` conflict reuses the winning id and remaps the proposer's bindings/statistics. `ensure_entity` remains a standalone store API for non-retain callers.
 
 ### 2.6 link (Link Construction)
 

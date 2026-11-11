@@ -112,7 +112,7 @@ These are settled design decisions. Do not deviate silently:
 - `chunk`: `(bank_id, content_hash)` is unique; the status flip and all products commit in one transaction; a failure leaves no partial rows.
 - `fact`: observation rows have `chunk_id IS NULL`; every opinion row has `confidence NOT NULL` while non-opinion rows have `confidence IS NULL`; reflect-formed opinions have `chunk_id IS NULL`.
 - `fact_link`: temporal edges exist only as complete pairs (no one-sided rows); semantic and causal edges are single rows.
-- `entity`: `mention_count` / `first_seen` / `last_seen` stay consistent with world/experience binding counts (maintained in the same transaction).
+- `entity`: `mention_count` / `first_seen` / `last_seen` stay consistent with world/experience binding counts (maintained in the same transaction); retain creates entity rows only in tx2 (`ChunkCommit.entities`) — `resolve` returns proposals and never writes.
 - `bank`: a background merge is carried by `ChunkCommit::background_update`; the CAS (`expected` background) and all chunk products commit or roll back together.
 
 ## 9. Next step

@@ -1,13 +1,17 @@
 //! Entity resolution ρ (paper §4.1.3).
 //!
 //! A mention is mapped to a canonical entity by maximizing
-//! `α·sim_str + β·sim_co + γ·sim_temp`, with an exact-name fast path and
-//! `ensure_entity` as the race-safe creation fallback.
+//! `α·sim_str + β·sim_co + γ·sim_temp`, with an exact-name fast path.
+//!
+//! Resolution is read-only: when no candidate matches, it returns a
+//! [`NewEntity`] proposal. The caller carries that proposal into
+//! [`crate::ports::ChunkCommit::entities`], so entity creation shares tx2 with
+//! the facts and bindings that reference it (no orphan rows on failure).
 
 use std::time::Duration;
 
 use crate::ports::{EntityCandidate, NewEntity, Store};
-use crate::types::{BankId, EntityId, EntityKind, EntityMention, Timestamp};
+use crate::types::{BankId, Entity, EntityId, EntityKind, EntityMention, Timestamp};
 use crate::{Error, Result};
 
 /// Resolution weights and thresholds. Runtime configuration — never persisted.
@@ -49,11 +53,27 @@ pub struct MentionContext {
   pub at: Option<Timestamp>,
 }
 
-/// Resolves a mention to a canonical entity, creating one when no candidate
+/// The result of resolving one mention.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedEntity {
+  /// Existing entity id, or the id of the proposal in `new_entity`.
+  pub id: EntityId,
+  /// A new entity to insert in tx2; `None` when an existing row matched.
+  pub new_entity: Option<NewEntity>,
+}
+
+/// Resolves a mention to a canonical entity, proposing one when no candidate
 /// passes the threshold.
 ///
-/// `now` stamps a newly created entity; it is the only use of the clock (no
-/// time is fabricated for scoring).
+/// `pending` holds entities already proposed by earlier mentions in the same
+/// chunk; they participate in both exact and fuzzy matching so a chunk cannot
+/// split one name into several proposals. Resolution is read-only: the caller
+/// must carry [`ResolvedEntity::new_entity`] into
+/// [`crate::ports::ChunkCommit::entities`] so entity creation shares tx2 with
+/// the facts and bindings that reference it.
+///
+/// `now` stamps a proposed entity; it is the only use of the clock (no time is
+/// fabricated for scoring).
 pub async fn resolve(
   store: &dyn Store,
   bank: BankId,
@@ -61,21 +81,32 @@ pub async fn resolve(
   ctx: &MentionContext,
   weights: &ResolveWeights,
   now: Timestamp,
-) -> Result<EntityId> {
+  pending: &[NewEntity],
+) -> Result<ResolvedEntity> {
   let canonical = normalize_name(&mention.text);
   if canonical.is_empty() {
     return Err(Error::config("entity mention is empty after normalization"));
   }
+  if let Some(foreign) = pending.iter().find(|new| new.bank_id != bank) {
+    return Err(Error::config(format!(
+      "pending entity {} belongs to another bank",
+      foreign.id
+    )));
+  }
 
-  let candidates = store
+  let mut candidates = store
     .entity_candidates(bank, &canonical, weights.candidate_limit)
     .await?;
+  candidates.extend(pending.iter().map(pending_candidate));
 
   if let Some(exact) = candidates
     .iter()
     .find(|candidate| candidate.entity.canonical_name == canonical)
   {
-    return Ok(exact.entity.id);
+    return Ok(ResolvedEntity {
+      id: exact.entity.id,
+      new_entity: None,
+    });
   }
 
   let mut best: Option<(f32, EntityId)> = None;
@@ -89,7 +120,10 @@ pub async fn resolve(
   if let Some((score, id)) = best
     && score >= weights.threshold
   {
-    return Ok(id);
+    return Ok(ResolvedEntity {
+      id,
+      new_entity: None,
+    });
   }
 
   let new = NewEntity {
@@ -99,9 +133,34 @@ pub async fn resolve(
     entity_type: mention.kind.unwrap_or(EntityKind::Other),
     created_at: now,
   };
-  let (id, _created) = store.ensure_entity(new).await?;
 
-  Ok(id)
+  Ok(ResolvedEntity {
+    id: new.id,
+    new_entity: Some(new),
+  })
+}
+
+/// Presents an uncommitted proposal as a candidate with no evidence yet: the
+/// same shape `entity_candidates` would return for a row that has been created
+/// but not bound.
+fn pending_candidate(new: &NewEntity) -> EntityCandidate {
+  EntityCandidate {
+    entity: Entity {
+      id: new.id,
+      bank_id: new.bank_id,
+      canonical_name: new.canonical_name.clone(),
+      entity_type: new.entity_type,
+      mention_count: 0,
+      first_seen: None,
+      last_seen: None,
+      attrs: None,
+      created_at: new.created_at,
+      updated_at: new.created_at,
+    },
+    variants: Vec::new(),
+    co_mentioned: Vec::new(),
+    last_mention_at: None,
+  }
 }
 
 /// Lowercases, trims, and collapses whitespace.

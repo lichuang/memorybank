@@ -1,11 +1,11 @@
 //! Background extraction worker and deterministic rescan pass.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use engine::link::{LinkConfig, build_semantic_links, build_temporal_links, causal_links};
 use engine::ports::{
-  BackgroundUpdate, ChunkCommit, EntityStatUpdate, NewBinding, NewChunk, NewFact, now_ts,
+  BackgroundUpdate, ChunkCommit, EntityStatUpdate, NewBinding, NewChunk, NewEntity, NewFact, now_ts,
 };
 use engine::resolve::{MentionContext, ResolveWeights, resolve};
 use engine::retain::{
@@ -13,7 +13,7 @@ use engine::retain::{
   fact_attrs, fact_text, merge_background,
 };
 use engine::tokens::CharHeuristic;
-use engine::types::{BankId, Chunk, ChunkId, EntityId, Fact, FactId, OccurrenceInterval};
+use engine::types::{BankId, Chunk, ChunkId, Entity, EntityId, Fact, FactId, OccurrenceInterval};
 use engine::{Error, Result};
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -264,7 +264,7 @@ impl MemoryBank {
 
     let mut bindings = Vec::new();
     let mut entity_stats = Vec::new();
-    let mut entity_ids: HashSet<EntityId> = HashSet::new();
+    let mut pending_entities: Vec<NewEntity> = Vec::new();
     let mut resolved: Vec<EntityId> = Vec::new();
 
     for (fact, extracted) in facts.iter().zip(&report.facts) {
@@ -273,18 +273,23 @@ impl MemoryBank {
           co_mentioned: resolved.clone(),
           at: fact.mentioned_at,
         };
-        let entity_id = resolve(
+        let resolution = resolve(
           self.store.as_ref(),
           bank,
           mention,
           &context,
           &self.pipeline.resolve,
           now,
+          &pending_entities,
         )
         .await?;
 
+        if let Some(new) = resolution.new_entity {
+          pending_entities.push(new);
+        }
+        let entity_id = resolution.id;
+
         resolved.push(entity_id);
-        entity_ids.insert(entity_id);
         bindings.push(NewBinding {
           bank_id: bank,
           fact_id: fact.id,
@@ -301,9 +306,10 @@ impl MemoryBank {
       }
     }
 
-    let mut ids: Vec<EntityId> = entity_ids.into_iter().collect();
-    ids.sort_unstable();
-    let entities = self.store.fetch_entities(&ids).await?;
+    // Only new proposals go into tx2; existing entities were already resolved
+    // by id. `commit_chunk` handles a canonical-name conflict by remapping
+    // bindings and statistics to the winning row.
+    let entities: Vec<Entity> = pending_entities.into_iter().map(entity_row).collect();
 
     let mut links =
       build_temporal_links(self.store.as_ref(), bank, &facts, &self.pipeline.links, now).await?;
@@ -384,6 +390,21 @@ impl MemoryBank {
         Err(error) => return Err(error),
       }
     }
+  }
+}
+
+fn entity_row(new: NewEntity) -> Entity {
+  Entity {
+    id: new.id,
+    bank_id: new.bank_id,
+    canonical_name: new.canonical_name,
+    entity_type: new.entity_type,
+    mention_count: 0,
+    first_seen: None,
+    last_seen: None,
+    attrs: None,
+    created_at: new.created_at,
+    updated_at: new.created_at,
   }
 }
 

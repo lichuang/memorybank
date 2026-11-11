@@ -1,7 +1,7 @@
 //! Entity existence, candidate retrieval, and resolution ρ.
 
 use engine::ports::{NewEntity, Store};
-use engine::resolve::{MentionContext, ResolveWeights, resolve};
+use engine::resolve::{MentionContext, ResolveWeights, ResolvedEntity, resolve};
 use engine::testing::timestamp;
 use engine::types::{Bank, BankId, BankProfile, EntityId, EntityKind, EntityMention, FactId};
 use store::SqliteStore;
@@ -43,6 +43,28 @@ fn entity(bank: BankId, name: &str, kind: EntityKind) -> NewEntity {
 async fn ensure(store: &SqliteStore, bank: BankId, name: &str) -> EntityId {
   let new = entity(bank, name, EntityKind::Person);
   store.ensure_entity(new).await.expect("ensure entity").0
+}
+
+async fn resolve_mention(
+  store: &SqliteStore,
+  bank: BankId,
+  text: &str,
+  pending: &[NewEntity],
+) -> ResolvedEntity {
+  resolve(
+    store,
+    bank,
+    &EntityMention {
+      text: text.into(),
+      kind: None,
+    },
+    &MentionContext::default(),
+    &ResolveWeights::default(),
+    ts(5_000),
+    pending,
+  )
+  .await
+  .expect("resolve")
 }
 
 async fn bind_mention(
@@ -234,7 +256,7 @@ async fn resolve_prefers_an_exact_canonical_name() {
   let (store, bank) = setup().await;
   let existing = ensure(&store, bank, "emily smith").await;
 
-  let id = resolve(
+  let resolved = resolve(
     &store,
     bank,
     &EntityMention {
@@ -244,11 +266,13 @@ async fn resolve_prefers_an_exact_canonical_name() {
     &MentionContext::default(),
     &ResolveWeights::default(),
     ts(5_000),
+    &[],
   )
   .await
   .expect("resolve");
 
-  assert_eq!(id, existing);
+  assert_eq!(resolved.id, existing);
+  assert!(resolved.new_entity.is_none());
 }
 
 #[tokio::test]
@@ -256,7 +280,7 @@ async fn resolve_fuzzy_matches_a_typo() {
   let (store, bank) = setup().await;
   let existing = ensure(&store, bank, "emily smith").await;
 
-  let id = resolve(
+  let resolved = resolve(
     &store,
     bank,
     &EntityMention {
@@ -266,18 +290,23 @@ async fn resolve_fuzzy_matches_a_typo() {
     &MentionContext::default(),
     &ResolveWeights::default(),
     ts(5_000),
+    &[],
   )
   .await
   .expect("resolve");
 
-  assert_eq!(id, existing, "10/11 similarity is above the threshold");
+  assert_eq!(
+    resolved.id, existing,
+    "10/11 similarity is above the threshold"
+  );
+  assert!(resolved.new_entity.is_none());
 }
 
 #[tokio::test]
-async fn resolve_creates_an_unknown_entity() {
+async fn resolve_proposes_an_unknown_entity_without_writing() {
   let (store, bank) = setup().await;
 
-  let id = resolve(
+  let resolved = resolve(
     &store,
     bank,
     &EntityMention {
@@ -287,13 +316,32 @@ async fn resolve_creates_an_unknown_entity() {
     &MentionContext::default(),
     &ResolveWeights::default(),
     ts(5_000),
+    &[],
   )
   .await
   .expect("resolve");
 
+  let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity WHERE bank_id = ?")
+    .bind(bank.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count");
+  assert_eq!(count, 0, "resolve must not write entity rows");
+
+  let proposed = resolved.new_entity.expect("proposal");
+  assert_eq!(proposed.id, resolved.id);
+  assert_eq!(proposed.canonical_name, "david");
+  assert_eq!(proposed.entity_type, EntityKind::Organization);
+  assert_eq!(proposed.created_at, ts(5_000));
+
+  store
+    .ensure_entity(proposed)
+    .await
+    .expect("persist proposal");
+
   let row: (String, String, i64) =
     sqlx::query_as("SELECT canonical_name, entity_type, created_at FROM entity WHERE id = ?")
-      .bind(id.to_string())
+      .bind(resolved.id.to_string())
       .fetch_one(store.pool())
       .await
       .expect("entity row");
@@ -316,6 +364,7 @@ async fn resolve_rejects_an_empty_mention() {
     &MentionContext::default(),
     &ResolveWeights::default(),
     ts(5_000),
+    &[],
   )
   .await
   .expect_err("empty mention");
@@ -324,11 +373,11 @@ async fn resolve_rejects_an_empty_mention() {
 }
 
 #[tokio::test]
-async fn resolve_below_the_threshold_creates_a_new_entity() {
+async fn resolve_below_the_threshold_proposes_a_new_entity() {
   let (store, bank) = setup().await;
   ensure(&store, bank, "emily smith").await;
 
-  let id = resolve(
+  let resolved = resolve(
     &store,
     bank,
     &EntityMention {
@@ -338,9 +387,16 @@ async fn resolve_below_the_threshold_creates_a_new_entity() {
     &MentionContext::default(),
     &ResolveWeights::default(),
     ts(5_000),
+    &[],
   )
   .await
   .expect("resolve");
+
+  let proposed = resolved.new_entity.expect("proposal");
+  store
+    .ensure_entity(proposed)
+    .await
+    .expect("persist proposal");
 
   let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity WHERE bank_id = ?")
     .bind(bank.to_string())
@@ -349,7 +405,7 @@ async fn resolve_below_the_threshold_creates_a_new_entity() {
     .expect("count");
   assert_eq!(count, 2);
   let created: String = sqlx::query_scalar("SELECT canonical_name FROM entity WHERE id = ?")
-    .bind(id.to_string())
+    .bind(resolved.id.to_string())
     .fetch_one(store.pool())
     .await
     .expect("created entity");
@@ -357,8 +413,9 @@ async fn resolve_below_the_threshold_creates_a_new_entity() {
 }
 
 #[tokio::test]
-async fn concurrent_resolution_of_the_same_name_yields_one_entity() {
+async fn concurrent_resolution_of_an_existing_name_is_stable() {
   let (store, bank) = setup().await;
+  let existing = ensure(&store, bank, "david").await;
   let weights = ResolveWeights::default();
   let ctx = MentionContext::default();
 
@@ -372,9 +429,10 @@ async fn concurrent_resolution_of_the_same_name_yields_one_entity() {
     let weights = weights.clone();
     let ctx = ctx.clone();
     handles.push(tokio::spawn(async move {
-      resolve(&store, bank, &mention, &ctx, &weights, ts(5_000))
+      resolve(&store, bank, &mention, &ctx, &weights, ts(5_000), &[])
         .await
         .expect("resolve")
+        .id
     }));
   }
 
@@ -383,14 +441,48 @@ async fn concurrent_resolution_of_the_same_name_yields_one_entity() {
     ids.push(handle.await.expect("join"));
   }
 
-  assert!(
-    ids.windows(2).all(|pair| pair[0] == pair[1]),
-    "ids: {ids:?}"
-  );
+  assert!(ids.iter().all(|id| *id == existing), "ids: {ids:?}");
   let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity WHERE bank_id = ?")
     .bind(bank.to_string())
     .fetch_one(store.pool())
     .await
     .expect("count");
   assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn resolve_reuses_a_pending_exact_name() {
+  let (store, bank) = setup().await;
+  let mut pending = Vec::new();
+
+  let first = resolve_mention(&store, bank, "David", &pending).await;
+  let proposal = first.new_entity.clone().expect("proposal");
+  pending.push(proposal);
+
+  let second = resolve_mention(&store, bank, "  david ", &pending).await;
+  assert_eq!(second.id, first.id);
+  assert!(second.new_entity.is_none());
+
+  let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity WHERE bank_id = ?")
+    .bind(bank.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count");
+  assert_eq!(count, 0, "pending entities stay in memory until tx2");
+}
+
+#[tokio::test]
+async fn resolve_fuzzy_matches_a_pending_entity() {
+  let (store, bank) = setup().await;
+  let mut pending = Vec::new();
+
+  let first = resolve_mention(&store, bank, "David Smith", &pending).await;
+  pending.push(first.new_entity.clone().expect("proposal"));
+
+  let second = resolve_mention(&store, bank, "David Smyth", &pending).await;
+  assert_eq!(
+    second.id, first.id,
+    "10/11 similarity is above the threshold"
+  );
+  assert!(second.new_entity.is_none());
 }
