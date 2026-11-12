@@ -4,8 +4,10 @@
 //! spans are an in-memory view used by chunking. Spans are deliberately **not**
 //! persisted: a crash between tx0 and tx1 falls back to window chunking (see
 //! `design/memory-schema.md` §5.1), which is why retain acks only after tx1.
+//! [`recover_time_hints`] reparses the durable `[<ts>]` prefixes so that crash
+//! recovery does not also lose chunk time bounds; session ids remain unrecoverable.
 
-use chrono::SecondsFormat;
+use chrono::{DateTime, SecondsFormat};
 
 use crate::types::Timestamp;
 
@@ -66,6 +68,23 @@ pub struct TurnSpan {
   pub session: Option<u32>,
 }
 
+/// A timestamp recovered from a canonical transcript line.
+///
+/// `start..end` is the byte range covered by the timestamped turn: it begins at
+/// the timestamped line and ends at the next recognized turn start (timed or
+/// untimed), or the text end. This stays coarser than [`TurnSpan`]: after a
+/// crash the session ids are gone, and multi-line text can confuse boundary
+/// detection, but the range is enough to attach time bounds to window chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeHint {
+  /// Inclusive start byte offset (the timestamped line).
+  pub start: usize,
+  /// Exclusive end byte offset (the next timestamped line, or text end).
+  pub end: usize,
+  /// Timestamp carried by the line.
+  pub at: Timestamp,
+}
+
 /// Canonical text plus its turn view.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedPayload {
@@ -115,6 +134,75 @@ pub fn normalize(payload: RawPayload) -> NormalizedPayload {
       NormalizedPayload { text, spans }
     }
   }
+}
+
+/// Recovers time hints from canonical transcript text after a crash.
+///
+/// A line starting with `[<rfc3339>] <speaker>: ` is a timed turn; a line
+/// starting with `<speaker>: ` is an untimed turn. The untimed boundary matters:
+/// it ends the preceding hint, so a timed turn's time does not bleed into a
+/// following untimed turn. Malformed timestamp prefixes are ignored.
+///
+/// The result is empty for documents and untimed transcripts, so callers keep
+/// the ordinary window fallback. Because canonical text does not escape
+/// newlines, a multi-line turn whose continuation happens to look like
+/// `speaker: ...` can end a hint early; recovery is intentionally conservative
+/// about adding times rather than inventing them.
+pub fn recover_time_hints(text: &str) -> Vec<TimeHint> {
+  let mut starts: Vec<(usize, Option<Timestamp>)> = Vec::new();
+  let mut line_start = 0;
+
+  while line_start < text.len() {
+    let line_end = text[line_start..]
+      .find('\n')
+      .map_or(text.len(), |offset| line_start + offset);
+    if let Some(at) = parse_turn_start(&text[line_start..line_end]) {
+      starts.push((line_start, at));
+    }
+    if line_end == text.len() {
+      break;
+    }
+    line_start = line_end + 1;
+  }
+
+  let mut hints = Vec::new();
+  for (index, (start, at)) in starts.iter().enumerate() {
+    let Some(at) = at else {
+      continue;
+    };
+    let end = starts.get(index + 1).map_or(text.len(), |(next, _)| *next);
+    hints.push(TimeHint {
+      start: *start,
+      end,
+      at: *at,
+    });
+  }
+  hints
+}
+
+/// Parses one canonical line as `Some(timestamp)` (timed turn),
+/// `Some(None)` (untimed turn), or `None` (not a turn start).
+fn parse_turn_start(line: &str) -> Option<Option<Timestamp>> {
+  if line.starts_with('[') {
+    let rest = line.strip_prefix('[')?;
+    let close = rest.find("] ")?;
+    let stamp = rest.get(..close)?;
+    let at = DateTime::parse_from_rfc3339(stamp)
+      .ok()?
+      .with_timezone(&chrono::Utc);
+    let after = rest.get(close + 2..)?;
+    if !after.contains(": ") {
+      return None;
+    }
+    return Some(Some(at));
+  }
+
+  let colon = line.find(": ")?;
+  let speaker = line.get(..colon)?;
+  if speaker.trim().is_empty() || speaker.chars().count() > 64 {
+    return None;
+  }
+  Some(None)
 }
 
 #[cfg(test)]
@@ -249,6 +337,86 @@ mod tests {
     let span = normalized.spans[0];
     assert_eq!(span.byte_end - span.byte_start, text.len());
     assert_eq!(&normalized.text[span.byte_start..span.byte_end], text);
+  }
+
+  #[test]
+  fn recovers_time_hints_from_canonical_text() {
+    let payload = normalize(RawPayload::Transcript {
+      title: None,
+      turns: vec![
+        RawTurn {
+          speaker: "user".into(),
+          text: "first".into(),
+          at: Some(at(12, 0)),
+          session: Some(1),
+        },
+        turn("assistant", "untimed"),
+        RawTurn {
+          speaker: "user".into(),
+          text: "second".into(),
+          at: Some(at(12, 1)),
+          session: Some(1),
+        },
+      ],
+    });
+
+    let hints = recover_time_hints(&payload.text);
+    assert_eq!(hints.len(), 2);
+    assert_eq!(hints[0].at, at(12, 0));
+    assert_eq!(hints[1].at, at(12, 1));
+    assert_eq!(hints[0].start, 0);
+
+    let untimed = payload
+      .text
+      .find("assistant: untimed")
+      .expect("untimed turn");
+    let second = payload
+      .text
+      .find("[2024-06-09T12:01:00.000Z]")
+      .expect("second prefix");
+    assert_eq!(
+      hints[0].end, untimed,
+      "the untimed turn ends the first timed hint"
+    );
+    assert_eq!(hints[1].start, second);
+    assert_eq!(hints[1].end, payload.text.len());
+  }
+
+  #[test]
+  fn recovery_ignores_untimed_and_malformed_lines() {
+    let text = "[not-a-time] user: no\n\
+                [2024-06-09T12:00:00.000Z] no speaker separator\n\
+                [2024-06-09T12:00:00.000Z] user: yes\n";
+
+    let hints = recover_time_hints(text);
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].at, at(12, 0));
+    assert_eq!(
+      hints[0].start,
+      text
+        .find("[2024-06-09T12:00:00.000Z] user: yes")
+        .expect("line")
+    );
+    assert_eq!(hints[0].end, text.len());
+  }
+
+  #[test]
+  fn documents_without_timestamps_recover_no_hints() {
+    assert!(recover_time_hints("").is_empty());
+    assert!(recover_time_hints("plain document\nno timestamps\n").is_empty());
+  }
+
+  #[test]
+  fn recovery_handles_cjk_line_offsets() {
+    let text = "[2024-06-09T12:00:00.000Z] 用户: 你好\n\
+                [2024-06-09T12:01:00.000Z] 用户: 再见\n";
+
+    let hints = recover_time_hints(text);
+    assert_eq!(hints.len(), 2);
+    let second = text.find("[2024-06-09T12:01:00.000Z]").expect("second");
+    assert_eq!(hints[0].start, 0);
+    assert_eq!(hints[0].end, second);
+    assert_eq!(hints[1].start, second);
   }
 
   #[test]

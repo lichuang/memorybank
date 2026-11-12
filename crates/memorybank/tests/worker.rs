@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use engine::ports::{JsonRequest, Llm, Store};
-use engine::retain::RawPayload;
+use engine::retain::{RawPayload, RawTurn, normalize};
 use engine::testing::{FakeLlm, FixedClock, HashEmbedder, timestamp};
 use engine::types::{Bank, BankId, BankProfile, Source, SourceId, SourceStatus};
 use memorybank::{MemoryBank, PipelineConfig, RetainConfig, RetainState, WorkerConfig};
@@ -265,6 +265,82 @@ async fn received_sources_are_rechunked_by_rescan() {
     .await
     .expect("chunks");
   assert_eq!(chunks, 1);
+}
+
+#[tokio::test]
+async fn received_transcript_recovers_chunk_times_on_rescan() {
+  let (sqlite, store, bank, llm) = setup(500).await;
+  llm.push(
+    "fact_extraction",
+    json!({ "facts": [fact_json("recovered from a crashed tx1", "Emily")] }),
+  );
+  let memory = memory(
+    store,
+    llm.clone(),
+    1_000,
+    WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    },
+  );
+
+  let payload = normalize(RawPayload::Transcript {
+    title: None,
+    turns: vec![
+      RawTurn {
+        speaker: "user".into(),
+        text: "first turn".into(),
+        at: Some(ts(1_000)),
+        session: Some(1),
+      },
+      RawTurn {
+        speaker: "assistant".into(),
+        text: "second turn".into(),
+        at: Some(ts(2_000)),
+        session: Some(1),
+      },
+    ],
+  });
+  let source = SourceId::new();
+  sqlite
+    .create_source(Source {
+      id: source,
+      bank_id: bank,
+      title: None,
+      payload_text: payload.text,
+      status: SourceStatus::Received,
+      created_at: ts(0),
+      updated_at: ts(0),
+    })
+    .await
+    .expect("source");
+
+  let report = memory.rescan(bank).await.expect("rescan");
+  assert_eq!(report.sources_chunked, 1);
+  assert_eq!(report.chunks_processed, 1);
+
+  let (start, end): (Option<i64>, Option<i64>) =
+    sqlx::query_as("SELECT time_start, time_end FROM chunk WHERE source_id = ?")
+      .bind(source.to_string())
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("chunk times");
+  assert_eq!(start, Some(1_000), "the first timestamp is recovered");
+  assert_eq!(end, Some(2_000), "the last timestamp is recovered");
+
+  let mentioned: Option<i64> = sqlx::query_scalar(
+    "SELECT f.mentioned_at FROM fact f JOIN chunk c ON c.id = f.chunk_id \
+     WHERE c.source_id = ?",
+  )
+  .bind(source.to_string())
+  .fetch_one(sqlite.pool())
+  .await
+  .expect("fact mention time");
+  assert_eq!(
+    mentioned,
+    Some(1_500),
+    "normalize_time fills the midpoint from recovered chunk bounds"
+  );
 }
 
 #[tokio::test]

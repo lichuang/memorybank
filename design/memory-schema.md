@@ -286,7 +286,7 @@ Key points:
 | Chunking | before/after tx1 | rescan re-chunks | chunk hash unique index; conflict = skip |
 | Extraction | outside the transaction (model calls) or during tx2 | chunk stays pending/extracting; rescan re-runs | atomic status claim + whole-transaction rollback; tx2 is guarded by the claim token, so a stale-steal loser writes nothing; α deltas live inside the transaction and are never applied twice |
 
-**Crash-window note (accepted)**: turn spans are not persisted. If the process dies between tx0 and tx1, rescan re-chunks from `payload_text` and falls back to window chunking (session alignment is best effort). Acking after tx1 keeps the normal path lossless, so this affects only true crashes in that window.
+**Crash-window note (accepted)**: turn spans are not persisted. If the process dies between tx0 and tx1, rescan re-chunks from `payload_text` and falls back to window chunking (session alignment is best effort). The canonical `[<ts>]` prefixes are reparsed into `TimeHint`s, so chunk `time_start/time_end` and the resulting `mentioned_at` / time prefix survive; session ids and exact turn boundaries remain lost. Acking after tx1 keeps the normal path lossless, so this affects only true crashes in that window.
 
 **Retry policy (runtime, not persisted)**: within one process the worker counts attempts per chunk and moves it to `failed` after `max_attempts`; a restart resets the counter, costing at most one extra model call per restart. `failed` rows are only reset by an operator; they are never retried automatically.
 

@@ -18,7 +18,7 @@ use std::ops::Range;
 use chrono::Duration;
 use sha2::{Digest, Sha256};
 
-use super::normalize::{NormalizedPayload, TurnSpan};
+use super::normalize::{NormalizedPayload, TimeHint, TurnSpan};
 use crate::tokens::TokenEstimator;
 use crate::types::Timestamp;
 
@@ -139,9 +139,42 @@ pub fn chunk(
     merged
   };
 
+  finalize_chunks(&payload.text, pending)
+}
+
+/// Window-chunks canonical text and attaches timestamps recovered from its
+/// `[<ts>]` prefixes.
+///
+/// This is the crash-recovery path: the original turn spans (and session ids)
+/// are gone, so chunk boundaries stay exactly the document/window fallback. The
+/// hints only supply `time_start`/`time_end` for the chunks they intersect;
+/// chunks without a hint keep `None`. An empty hint list therefore behaves
+/// exactly like [`chunk`] on a document.
+pub fn chunk_with_time_hints(
+  text: &str,
+  hints: &[TimeHint],
+  cfg: &ChunkConfig,
+  estimator: &dyn TokenEstimator,
+) -> Vec<RawChunk> {
+  let max_tokens = cfg.max_tokens.max(1);
+  let pending: Vec<PendingChunk> = document_chunks(text, max_tokens, estimator)
+    .into_iter()
+    .map(|mut piece| {
+      let (time_start, time_end) = hint_range(hints, &piece.range);
+      piece.time_start = time_start;
+      piece.time_end = time_end;
+      piece
+    })
+    .collect();
+
+  finalize_chunks(text, pending)
+}
+
+/// Turns pending ranges into dense-indexed, hashed chunks.
+fn finalize_chunks(text: &str, pending: Vec<PendingChunk>) -> Vec<RawChunk> {
   let mut chunks = Vec::new();
   for piece in pending {
-    let text = &payload.text[piece.range];
+    let text = &text[piece.range];
     if text.trim().is_empty() {
       continue;
     }
@@ -155,6 +188,21 @@ pub fn chunk(
     });
   }
   chunks
+}
+
+/// Returns the min/max hint time intersecting `range`.
+fn hint_range(hints: &[TimeHint], range: &Range<usize>) -> (Option<Timestamp>, Option<Timestamp>) {
+  let mut start: Option<Timestamp> = None;
+  let mut end: Option<Timestamp> = None;
+
+  for hint in hints {
+    if hint.start < range.end && hint.end > range.start {
+      start = Some(start.map_or(hint.at, |current| current.min(hint.at)));
+      end = Some(end.map_or(hint.at, |current| current.max(hint.at)));
+    }
+  }
+
+  (start, end)
 }
 
 /// Hashes a chunk's text for cross-source dedup (`chunk.content_hash`).
@@ -453,7 +501,7 @@ mod tests {
   use chrono::TimeZone;
 
   use super::*;
-  use crate::retain::normalize::{RawPayload, RawTurn, normalize};
+  use crate::retain::normalize::{RawPayload, RawTurn, normalize, recover_time_hints};
   use crate::tokens::CharHeuristic;
 
   fn estimator() -> CharHeuristic {
@@ -507,6 +555,54 @@ mod tests {
     assert!(chunks[1].text.contains("third"));
     assert_eq!(chunks[1].time_start, Some(at(13, 0)));
     assert_eq!(chunks[1].time_end, Some(at(13, 0)));
+  }
+
+  #[test]
+  fn recovered_hints_annotate_window_chunks() {
+    let payload = transcript(vec![
+      turn("first", Some(at(12, 0)), Some(1)),
+      turn("second", Some(at(12, 1)), Some(1)),
+    ]);
+    let hints = recover_time_hints(&payload.text);
+
+    let chunks = chunk_with_time_hints(&payload.text, &hints, &config(1_000), &estimator());
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].text, payload.text);
+    assert_eq!(chunks[0].time_start, Some(at(12, 0)));
+    assert_eq!(chunks[0].time_end, Some(at(12, 1)));
+  }
+
+  #[test]
+  fn no_recovered_hints_leave_times_none() {
+    let chunks = chunk_with_time_hints("plain text\n", &[], &config(1_000), &estimator());
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].time_start, None);
+    assert_eq!(chunks[0].time_end, None);
+  }
+
+  #[test]
+  fn hint_ranges_intersect_chunk_ranges() {
+    let first = at(12, 0);
+    let second = at(12, 1);
+    let hints = [
+      TimeHint {
+        start: 0,
+        end: 10,
+        at: first,
+      },
+      TimeHint {
+        start: 10,
+        end: 20,
+        at: second,
+      },
+    ];
+
+    assert_eq!(hint_range(&hints, &(0..5)), (Some(first), Some(first)));
+    assert_eq!(hint_range(&hints, &(10..15)), (Some(second), Some(second)));
+    assert_eq!(hint_range(&hints, &(0..20)), (Some(first), Some(second)));
+    assert_eq!(hint_range(&hints, &(20..25)), (None, None));
   }
 
   #[test]

@@ -187,7 +187,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 
 - All model calls (extraction/Assess/background merge/embedding) happen **outside** tx2; tx2 is pure database writes. Background snippets are extracted in the same A.1 call, merged only when present, and the merged `bank.background` is CAS-written inside tx2 (schema A3).
 - `retain` is an **async ack** API: it returns the `SourceId` after tx1, so ack means "durably queued", not "done". Failures before the ack are returned as errors; failures after it are visible only through `retain_status` (`CompletedWithFailures` / `Failed`).
-- Chunking happens **before** the ack on purpose: the normalized turn spans are still in memory, so acking after tx1 avoids losing session alignment on a crash between tx0 and tx1.
+- Chunking happens **before** the ack on purpose: the normalized turn spans are still in memory, so acking after tx1 avoids losing session alignment on a crash between tx0 and tx1. If that window is hit, rescan keeps window chunking and reparses the canonical `[<ts>]` prefixes for time bounds; session ids remain unrecoverable.
 - A running worker is required to make progress; notifications are best-effort and the periodic sweep guarantees convergence after a lost wake-up.
 
 ### 2.2 recall (Four Channels → RRF → Rerank → Budget)

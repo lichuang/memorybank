@@ -305,7 +305,7 @@ pub struct FixedClock(pub Timestamp);
 
 ## P1-1 Payload Normalization
 
-**Status**: ✅ (2026-10-27)
+**Status**: ✅ (2026-10-27; crash time recovery 2026-11-11)
 
 - **Content**: turn caller input into canonical text + a turn view.
 - **Design**:
@@ -314,18 +314,21 @@ pub struct RawTurn { pub speaker: String, pub text: String, pub at: Option<Times
 pub enum RawPayload { Transcript { title: Option<String>, turns: Vec<RawTurn> }, Document { title: Option<String>, text: String } }
 pub struct TurnSpan { pub byte_start: usize, pub byte_end: usize, pub at: Option<Timestamp>, pub session: Option<u32> }
 pub struct NormalizedPayload { pub text: String, pub spans: Vec<TurnSpan> }
+pub struct TimeHint { pub start: usize, pub end: usize, pub at: Timestamp }
 impl RawPayload { pub fn title(&self) -> Option<&str> }   // retained for the source row
 pub fn normalize(p: RawPayload) -> NormalizedPayload
+pub fn recover_time_hints(text: &str) -> Vec<TimeHint>
 // transcript line: "[<ts>] <speaker>: <text>\n"; the [<ts>] prefix is omitted when `at` is None
 // <ts> = RFC3339 UTC with millisecond precision, e.g. 2024-06-09T12:00:00.000Z
 ```
-- **Span contract**: `byte_start..byte_end` covers **only the turn text** (not `[ts] speaker: `, not the trailing `\n`), so `&normalized.text[start..end] == turn.text`. Sessions live in `TurnSpan.session` only (not in the text); after a crash between tx0 and tx1, rescan re-chunks from `payload_text` with window fallback (accepted, see `memory-schema.md` §5.1).
-- **Acceptance**: Document passes through byte-for-byte (empty spans); Transcript keeps timestamps in text and sessions in spans; spans are invertible; no time is fabricated when `at` is `None`.
-- **Tests**: empty turns, CJK (byte offsets, not chars), extremely long single turn, multi-line turn text, missing timestamp, title accessor.
+- **Span contract**: `byte_start..byte_end` covers **only the turn text** (not `[ts] speaker: `, not the trailing `\n`), so `&normalized.text[start..end] == turn.text`. Sessions live in `TurnSpan.session` only (not in the text).
+- **Crash recovery**: after a crash between tx0 and tx1, rescan keeps the window fallback but reparses line-start `[<rfc3339>] <speaker>: ` prefixes into `TimeHint`s, so chunk `time_start/time_end`, `mentioned_at`, and the fact time prefix survive. Session ids and exact turn boundaries are not recoverable (see `memory-schema.md` §5.1).
+- **Acceptance**: Document passes through byte-for-byte (empty spans); Transcript keeps timestamps in text and sessions in spans; spans are invertible; no time is fabricated when `at` is `None`; recovery returns empty for untimed text and ignores malformed timestamp prefixes.
+- **Tests**: empty turns, CJK (byte offsets, not chars), extremely long single turn, multi-line turn text, missing timestamp, title accessor, recovered time hints (valid/malformed/CJK).
 
 ## P1-2 Chunker
 
-**Status**: ✅ (2026-10-27)
+**Status**: ✅ (2026-10-27; recovery hints 2026-11-11)
 
 - **Content**: session alignment + window fallback + hashing.
 - **Design**:
@@ -334,12 +337,14 @@ pub struct ChunkConfig { pub session_gap: Duration, pub max_tokens: usize, pub m
 pub struct RawChunk { pub index: u32, pub text: String, pub content_hash: String,
                       pub time_start: Option<Timestamp>, pub time_end: Option<Timestamp> }
 pub fn chunk(p: &NormalizedPayload, cfg: &ChunkConfig, est: &dyn TokenEstimator) -> Vec<RawChunk>
+pub fn chunk_with_time_hints(text: &str, hints: &[TimeHint], cfg: &ChunkConfig,
+                             est: &dyn TokenEstimator) -> Vec<RawChunk>
 pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256 (lowercase hex)
 // TokenEstimator + CharHeuristic live in engine::tokens (shared with P2-7)
 ```
-- **Boundary rules**: chunks cut only at turn/line boundaries; a turn larger than `max_tokens` is split at UTF-8 char boundaries; a chunk below `min_tokens` merges into the previous chunk when it still fits `max_tokens` (may cross a session boundary); documents use pure windows; every chunk is a verbatim slice, whitespace-only pieces are dropped; `time_start/time_end` are the min/max turn times covered.
-- **Acceptance**: deterministic; never empty; oversized sessions split without crossing turn boundaries; whitespace-only hash differences collapse.
-- **Tests**: sessions by id and by gap, oversized session, oversized turn, CJK windows, small-chunk merge, determinism, empty inputs, hash normalization.
+- **Boundary rules**: chunks cut only at turn/line boundaries; a turn larger than `max_tokens` is split at UTF-8 char boundaries; a chunk below `min_tokens` merges into the previous chunk when it still fits `max_tokens` (may cross a session boundary); documents use pure windows; every chunk is a verbatim slice, whitespace-only pieces are dropped; `time_start/time_end` are the min/max turn times covered. The crash-recovery path (`chunk_with_time_hints`) keeps the window boundaries and attaches recovered timestamps to the window ranges they intersect.
+- **Acceptance**: deterministic; never empty; oversized sessions split without crossing turn boundaries; whitespace-only hash differences collapse; recovered hints set `time_start/time_end` without changing window chunking; no hints preserve the existing document behavior.
+- **Tests**: sessions by id and by gap, oversized session, oversized turn, CJK windows, small-chunk merge, determinism, empty inputs, hash normalization, recovered hint bounds/intersection.
 
 ## P1-3 `create_source` (tx0)
 
@@ -689,7 +694,8 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
                           pub failed: usize }
 ```
   `rescan` reads `pending_work`, re-chunks `received` sources from `payload_text` (window
-  fallback; spans are not persisted), then loops `claim_chunk` over pending/stale rows. Each
+  fallback; spans are not persisted, but `recover_time_hints` reparses the canonical `[<ts>]`
+  prefixes into chunk time bounds), then loops `claim_chunk` over pending/stale rows. Each
   chunk runs `extract_facts → resolve → embed_facts → temporal/semantic links → causal_links →
   load bank + merge_background (LLM) → commit_chunk` (opinion updates stay empty while P1-15 is
   on hold). The merge result rides in `ChunkCommit::background_update`, so A3 commits atomically
@@ -726,7 +732,9 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
   - background snippets update `bank.background` atomically with the chunk; a stale CAS leaves
     no facts and no background change;
   - a failure after resolution (e.g. background merge) leaves zero `entity` rows: proposals
-    never write before tx2.
+    never write before tx2;
+  - a crash between tx0 and tx1 recovers chunk `time_start/time_end` and fact `mentioned_at`
+    from the canonical `[<ts>]` prefixes during rescan.
 
 ## P1-20 Background Merging
 

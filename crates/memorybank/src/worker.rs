@@ -9,8 +9,8 @@ use engine::ports::{
 };
 use engine::resolve::{MentionContext, ResolveWeights, resolve};
 use engine::retain::{
-  BackgroundConfig, ExtractionConfig, NormalizedPayload, chunk, embed_facts, extract_facts,
-  fact_attrs, fact_text, merge_background,
+  BackgroundConfig, ExtractionConfig, chunk_with_time_hints, embed_facts, extract_facts,
+  fact_attrs, fact_text, merge_background, recover_time_hints,
 };
 use engine::tokens::CharHeuristic;
 use engine::types::{BankId, Chunk, ChunkId, Entity, EntityId, Fact, FactId, OccurrenceInterval};
@@ -139,29 +139,32 @@ impl MemoryBank {
       .pending_work(bank, now_ts(self.clock.as_ref()), config.stale_after)
       .await?;
 
-    // A crash between tx0 and tx1 leaves `received`; re-chunk from the payload
-    // (turn spans are gone, so this uses the window fallback).
+    // A crash between tx0 and tx1 leaves `received`; re-chunk from the payload.
+    // Turn spans are gone, so this keeps the window fallback, but the canonical
+    // `[ts]` prefixes recover time bounds (session ids remain unrecoverable).
     for source_id in work.sources_received {
       let source = self.store.load_source(bank, source_id).await?;
-      let normalized = NormalizedPayload {
-        text: source.payload_text.clone(),
-        spans: Vec::new(),
-      };
+      let hints = recover_time_hints(&source.payload_text);
       let now = now_ts(self.clock.as_ref());
-      let chunks: Vec<NewChunk> = chunk(&normalized, &self.config.chunk, &CharHeuristic::default())
-        .into_iter()
-        .map(|raw| NewChunk {
-          id: ChunkId::new(),
-          bank_id: bank,
-          source_id,
-          chunk_index: raw.index,
-          text: raw.text,
-          content_hash: raw.content_hash,
-          time_start: raw.time_start,
-          time_end: raw.time_end,
-          created_at: now,
-        })
-        .collect();
+      let chunks: Vec<NewChunk> = chunk_with_time_hints(
+        &source.payload_text,
+        &hints,
+        &self.config.chunk,
+        &CharHeuristic::default(),
+      )
+      .into_iter()
+      .map(|raw| NewChunk {
+        id: ChunkId::new(),
+        bank_id: bank,
+        source_id,
+        chunk_index: raw.index,
+        text: raw.text,
+        content_hash: raw.content_hash,
+        time_start: raw.time_start,
+        time_end: raw.time_end,
+        created_at: now,
+      })
+      .collect();
 
       self.store.append_chunks(source_id, chunks).await?;
       sources_chunked += 1;
