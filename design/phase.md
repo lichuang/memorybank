@@ -328,7 +328,7 @@ pub fn recover_time_hints(text: &str) -> Vec<TimeHint>
 
 ## P1-2 Chunker
 
-**Status**: ✅ (2026-10-27; recovery hints 2026-11-11)
+**Status**: ✅ (2026-10-27; recovery hints 2026-11-11; same-session merge 2026-11-12)
 
 - **Content**: session alignment + window fallback + hashing.
 - **Design**:
@@ -342,9 +342,9 @@ pub fn chunk_with_time_hints(text: &str, hints: &[TimeHint], cfg: &ChunkConfig,
 pub fn chunk_hash(text: &str) -> String   // whitespace-normalized + SHA-256 (lowercase hex)
 // TokenEstimator + CharHeuristic live in engine::tokens (shared with P2-7)
 ```
-- **Boundary rules**: chunks cut only at turn/line boundaries; a turn larger than `max_tokens` is split at UTF-8 char boundaries; a chunk below `min_tokens` merges into the previous chunk when it still fits `max_tokens` (may cross a session boundary); documents use pure windows; every chunk is a verbatim slice, whitespace-only pieces are dropped; `time_start/time_end` are the min/max turn times covered. The crash-recovery path (`chunk_with_time_hints`) keeps the window boundaries and attaches recovered timestamps to the window ranges they intersect.
+- **Boundary rules**: chunks cut only at turn/line boundaries; a turn larger than `max_tokens` is split at UTF-8 char boundaries; a chunk below `min_tokens` merges into the previous chunk only when both belong to the **same session** and the result still fits `max_tokens` (session boundaries are never crossed); documents use pure windows; every chunk is a verbatim slice, whitespace-only pieces are dropped; `time_start/time_end` are the min/max turn times covered. The crash-recovery path (`chunk_with_time_hints`) keeps the window boundaries and attaches recovered timestamps to the window ranges they intersect.
 - **Acceptance**: deterministic; never empty; oversized sessions split without crossing turn boundaries; whitespace-only hash differences collapse; recovered hints set `time_start/time_end` without changing window chunking; no hints preserve the existing document behavior.
-- **Tests**: sessions by id and by gap, oversized session, oversized turn, CJK windows, small-chunk merge, determinism, empty inputs, hash normalization, recovered hint bounds/intersection.
+- **Tests**: sessions by id and by gap, oversized session, oversized turn, CJK windows, same-session small-chunk merge, no merge across session ids or timestamp gaps, determinism, empty inputs, hash normalization, recovered hint bounds/intersection.
 
 ## P1-3 `create_source` (tx0)
 

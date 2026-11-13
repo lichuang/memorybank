@@ -172,7 +172,7 @@ Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 ingest(payload):
   canonical text + turn spans (in memory)
   tx0: create_source (payload_text, status=received)
-  chunking (session-alignment first / window fallback; spans still in memory)
+  chunking (session-alignment first / window fallback; small merges stay within a session; spans still in memory)
   tx1: append_chunks (hash conflicts skipped) + source.status=chunked
   ── ack: return SourceId (durably queued; no model work has run yet)
 worker loop (required for processing, one-shot `rescan` in tests):

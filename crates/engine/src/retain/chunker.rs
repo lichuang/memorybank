@@ -8,7 +8,8 @@
 //! 2. **Window fallback** — documents (no spans) and oversized turns are split
 //!    at `max_tokens`, always on UTF-8 char boundaries.
 //! 3. **Small-chunk merge** — a chunk smaller than `min_tokens` is merged into
-//!    the previous one when the result still fits `max_tokens`.
+//!    the previous one when the result still fits `max_tokens` and both pieces
+//!    belong to the same session. Session boundaries are never crossed.
 //!
 //! Chunk text is always a verbatim slice of the canonical text, so re-assembling
 //! the slices reproduces the payload (minus whitespace-only pieces).
@@ -33,8 +34,8 @@ pub struct ChunkConfig {
   /// documents are split at this size. Values below 1 are clamped to 1.
   pub max_tokens: usize,
   /// Soft lower bound: a chunk smaller than this is merged into the previous
-  /// chunk when the result still fits `max_tokens` (possibly crossing a session
-  /// boundary). Zero disables merging.
+  /// chunk when the result still fits `max_tokens` and both pieces belong to the
+  /// same session. Session boundaries are never crossed. Zero disables merging.
   pub min_tokens: usize,
 }
 
@@ -73,7 +74,8 @@ pub struct RawChunk {
 ///    [`ChunkConfig::max_tokens`] are sliced as windows. Windows are cut on
 ///    UTF-8 char boundaries, never inside a character.
 /// 3. **Small-chunk merge** — a chunk below [`ChunkConfig::min_tokens`] is
-///    merged into the previous chunk when the result still fits `max_tokens`.
+///    merged into the previous chunk when the result still fits `max_tokens` and
+///    both pieces belong to the same session.
 ///
 /// # Guarantees
 ///
@@ -108,23 +110,30 @@ pub fn chunk(
     // Split by session first: `group_sessions` only looks at metadata (a change
     // of session id, or a timestamp gap above `session_gap`) and never at size,
     // so every group is a whole-turn slice of the text.
-    for group in group_sessions(units, cfg.session_gap) {
+    for (group_index, group) in group_sessions(units, cfg.session_gap)
+      .into_iter()
+      .enumerate()
+    {
       // Then split each session by budget: `chunk_group` greedily packs whole
       // units up to `max_tokens` and only cuts inside a turn when that turn
       // alone is too large. Ranges stay in the original text coordinates.
-      for piece in chunk_group(&payload.text, &group, max_tokens, estimator) {
-        // Consecutive sessions may still merge below when the new piece is tiny.
+      for mut piece in chunk_group(&payload.text, &group, max_tokens, estimator) {
+        piece.group = Some(group_index);
         // Small-chunk merge: when this piece is below `min_tokens` and absorbing
         // it into the previous chunk still fits `max_tokens`, extend the previous
         // chunk instead of emitting a tiny standalone chunk (fewer model calls,
-        // fewer low-value retrieval units). This may cross a session boundary on
-        // purpose; see `ChunkConfig::min_tokens`.
+        // fewer low-value retrieval units). A session boundary always wins: a
+        // merged chunk would otherwise mix two sessions and its time midpoint
+        // could fall between them.
         if let Some(previous) = merged.last_mut() {
           let small = estimator.estimate(&payload.text[piece.range.clone()]) < cfg.min_tokens;
           // Pieces arrive in text order, so `previous.start..piece.end` is the
           // contiguous union of both slices (plus any whitespace between them).
           let combined = previous.range.start..piece.range.end;
-          if small && estimator.estimate(&payload.text[combined.clone()]) <= max_tokens {
+          if previous.group == piece.group
+            && small
+            && estimator.estimate(&payload.text[combined.clone()]) <= max_tokens
+          {
             previous.range = combined;
             // The merged chunk now covers both pieces' time window. `time_start`
             // is inherited from the previous chunk, which assumes timestamps are
@@ -240,6 +249,9 @@ struct PendingChunk {
   range: Range<usize>,
   time_start: Option<Timestamp>,
   time_end: Option<Timestamp>,
+  /// Session group index for transcript chunks; `None` for documents. Two
+  /// pieces may merge only when their group index is the same.
+  group: Option<usize>,
 }
 
 /// Extends each span to whole lines and drops malformed spans.
@@ -361,6 +373,7 @@ fn chunk_group(
         range,
         time_start,
         time_end,
+        group: None,
       }
     })
     .collect()
@@ -463,6 +476,7 @@ fn document_chunks(
       range,
       time_start: None,
       time_end: None,
+      group: None,
     })
     .collect()
 }
@@ -716,17 +730,59 @@ mod tests {
   #[test]
   fn small_chunks_merge_into_the_previous_chunk() {
     let payload = transcript(vec![
-      turn(&"a".repeat(60), None, Some(1)),
-      turn(&"b".repeat(20), None, Some(2)),
+      turn(&"a".repeat(60), Some(at(12, 0)), Some(1)),
+      turn(&"b".repeat(20), Some(at(12, 1)), Some(1)),
     ]);
     let mut cfg = config(200);
     cfg.min_tokens = 50;
 
     let chunks = chunk(&payload, &cfg, &estimator());
 
-    assert_eq!(chunks.len(), 1, "the small second session is merged");
+    assert_eq!(chunks.len(), 1, "the small same-session chunk is merged");
     assert!(chunks[0].text.contains(&"a".repeat(60)));
     assert!(chunks[0].text.contains(&"b".repeat(20)));
+    assert_eq!(chunks[0].time_start, Some(at(12, 0)));
+    assert_eq!(chunks[0].time_end, Some(at(12, 1)));
+  }
+
+  #[test]
+  fn small_chunks_do_not_merge_across_session_ids() {
+    let payload = transcript(vec![
+      turn(&"a".repeat(60), Some(at(10, 0)), Some(1)),
+      turn(&"b".repeat(20), Some(at(18, 0)), Some(2)),
+    ]);
+    let mut cfg = config(200);
+    cfg.min_tokens = 50;
+
+    let chunks = chunk(&payload, &cfg, &estimator());
+
+    assert_eq!(chunks.len(), 2, "a session boundary must not be crossed");
+    assert_eq!(chunks[0].time_start, Some(at(10, 0)));
+    assert_eq!(chunks[0].time_end, Some(at(10, 0)));
+    assert_eq!(chunks[1].time_start, Some(at(18, 0)));
+    assert_eq!(chunks[1].time_end, Some(at(18, 0)));
+  }
+
+  #[test]
+  fn small_chunks_do_not_merge_across_timestamp_gap_sessions() {
+    let payload = transcript(vec![
+      turn(&"a".repeat(60), Some(at(10, 0)), None),
+      turn(&"b".repeat(20), Some(at(18, 0)), None),
+    ]);
+    let mut cfg = config(200);
+    cfg.min_tokens = 50;
+
+    let chunks = chunk(&payload, &cfg, &estimator());
+
+    assert_eq!(
+      chunks.len(),
+      2,
+      "a timestamp-gap session boundary must not be crossed"
+    );
+    assert_eq!(chunks[0].time_start, Some(at(10, 0)));
+    assert_eq!(chunks[0].time_end, Some(at(10, 0)));
+    assert_eq!(chunks[1].time_start, Some(at(18, 0)));
+    assert_eq!(chunks[1].time_end, Some(at(18, 0)));
   }
 
   #[test]
