@@ -3,10 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::ports::Store;
+use engine::ports::{NewEntity, Store};
 use engine::retain::{RawPayload, RawTurn};
 use engine::testing::{FixedClock, timestamp};
-use engine::types::{Bank, BankId, BankProfile, ChunkId, FactId, Source, SourceId, SourceStatus};
+use engine::types::{
+  Bank, BankId, BankProfile, ChunkId, EntityId, EntityKind, FactId, Source, SourceId, SourceStatus,
+};
 use memorybank::{MemoryBank, RetainConfig, RetainState};
 use store::SqliteStore;
 use store::testing::memory_pool;
@@ -53,6 +55,54 @@ fn payload(text: &str) -> RawPayload {
       session: Some(1),
     }],
   }
+}
+
+#[tokio::test]
+async fn facade_merges_entities_with_the_injected_clock() {
+  let (sqlite, store, bank) = setup(1_000).await;
+  let memory = memory_bank(store, 1_000);
+
+  let from = EntityId::new();
+  sqlite
+    .ensure_entity(NewEntity {
+      id: from,
+      bank_id: bank,
+      canonical_name: "emily".into(),
+      entity_type: EntityKind::Person,
+      created_at: ts(0),
+    })
+    .await
+    .expect("source");
+  let into = EntityId::new();
+  sqlite
+    .ensure_entity(NewEntity {
+      id: into,
+      bank_id: bank,
+      canonical_name: "emily smith".into(),
+      entity_type: EntityKind::Person,
+      created_at: ts(0),
+    })
+    .await
+    .expect("target");
+
+  memory
+    .merge_entities(bank, from, into)
+    .await
+    .expect("merge");
+
+  let source_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity WHERE id = ?")
+    .bind(from.to_string())
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("source count");
+  assert_eq!(source_rows, 0);
+
+  let updated_at: i64 = sqlx::query_scalar("SELECT updated_at FROM entity WHERE id = ?")
+    .bind(into.to_string())
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("target");
+  assert_eq!(updated_at, 1_000, "the injected clock stamps the merge");
 }
 
 #[tokio::test]

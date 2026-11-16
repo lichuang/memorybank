@@ -606,6 +606,35 @@ impl Store for SqliteStore {
     rows.into_iter().map(entity_from_row).collect()
   }
 
+  async fn merge_entities(
+    &self,
+    bank: BankId,
+    from: EntityId,
+    into: EntityId,
+    now: Timestamp,
+  ) -> Result<()> {
+    if from == into {
+      return Err(Error::config("cannot merge an entity into itself"));
+    }
+
+    let mut tx = self
+      .pool
+      .begin()
+      .await
+      .map_err(|error| map_write("entity merge", error))?;
+
+    match merge_entities_tx(&mut tx, bank, from, into, now).await {
+      Ok(()) => tx
+        .commit()
+        .await
+        .map_err(|error| map_write("entity merge", error)),
+      Err(error) => {
+        let _ = tx.rollback().await;
+        Err(error)
+      }
+    }
+  }
+
   async fn entity_candidates(
     &self,
     bank: BankId,
@@ -936,6 +965,164 @@ impl Store for SqliteStore {
   ) -> Result<usize> {
     Err(not_implemented("gc_observations"))
   }
+}
+
+/// Loads one entity row inside a maintenance transaction.
+async fn load_entity_row(
+  tx: &mut Transaction<'_, Sqlite>,
+  bank: BankId,
+  id: EntityId,
+) -> Result<EntityRow> {
+  let row: Option<EntityRow> = sqlx::query_as(
+    "SELECT id, bank_id, canonical_name, entity_type, mention_count, first_seen, last_seen, \
+            attrs, created_at, updated_at FROM entity WHERE id = ? AND bank_id = ?",
+  )
+  .bind(id.to_string())
+  .bind(bank.to_string())
+  .fetch_optional(&mut **tx)
+  .await
+  .map_err(|error| map_read("entity", error))?;
+
+  row.ok_or_else(|| Error::not_found("entity", id.to_string()))
+}
+
+/// Executes one entity merge inside the caller's transaction.
+async fn merge_entities_tx(
+  tx: &mut Transaction<'_, Sqlite>,
+  bank: BankId,
+  from: EntityId,
+  into: EntityId,
+  now: Timestamp,
+) -> Result<()> {
+  let from_entity = entity_from_row(load_entity_row(tx, bank, from).await?)?;
+  let into_entity = entity_from_row(load_entity_row(tx, bank, into).await?)?;
+
+  // A fact may be bound to both entities; the composite PK allows only one row
+  // after the move, so drop the source's duplicate bindings first.
+  sqlx::query(
+    "DELETE FROM fact_entity WHERE bank_id = ? AND entity_id = ? AND fact_id IN ( \
+       SELECT fact_id FROM fact_entity WHERE bank_id = ? AND entity_id = ?)",
+  )
+  .bind(bank.to_string())
+  .bind(from.to_string())
+  .bind(bank.to_string())
+  .bind(into.to_string())
+  .execute(&mut **tx)
+  .await
+  .map_err(|error| map_write("fact_entity", error))?;
+
+  sqlx::query(
+    "UPDATE fact_entity SET entity_id = ?, updated_at = ? WHERE bank_id = ? AND entity_id = ?",
+  )
+  .bind(into.to_string())
+  .bind(to_epoch_millis(now))
+  .bind(bank.to_string())
+  .bind(from.to_string())
+  .execute(&mut **tx)
+  .await
+  .map_err(|error| map_write("fact_entity", error))?;
+
+  // Keep the survivor's type unless it is only a placeholder; then prefer the
+  // source's more specific classification.
+  let entity_type = if into_entity.entity_type == EntityKind::Other {
+    from_entity.entity_type
+  } else {
+    into_entity.entity_type
+  };
+  let attrs = merge_entity_attrs(into_entity.attrs, from_entity.attrs, from);
+
+  // Recompute from the surviving evidence instead of summing counters: the two
+  // rows may both have been bound to the same fact before the dedup above.
+  let updated = sqlx::query(
+    "UPDATE entity SET \
+       entity_type = ?, \
+       mention_count = COALESCE(( \
+         SELECT COUNT(*) FROM fact_entity fe JOIN fact f ON f.id = fe.fact_id \
+         WHERE fe.bank_id = ? AND fe.entity_id = ? AND f.fact_type IN ('world', 'experience')), 0), \
+       first_seen = ( \
+         SELECT MIN(COALESCE(f.mentioned_at, f.created_at)) \
+         FROM fact_entity fe JOIN fact f ON f.id = fe.fact_id \
+         WHERE fe.bank_id = ? AND fe.entity_id = ? AND f.fact_type IN ('world', 'experience')), \
+       last_seen = ( \
+         SELECT MAX(COALESCE(f.mentioned_at, f.created_at)) \
+         FROM fact_entity fe JOIN fact f ON f.id = fe.fact_id \
+         WHERE fe.bank_id = ? AND fe.entity_id = ? AND f.fact_type IN ('world', 'experience')), \
+       attrs = ?, updated_at = ? \
+     WHERE id = ? AND bank_id = ?",
+  )
+  .bind(entity_type.as_str())
+  .bind(bank.to_string())
+  .bind(into.to_string())
+  .bind(bank.to_string())
+  .bind(into.to_string())
+  .bind(bank.to_string())
+  .bind(into.to_string())
+  .bind(attrs.as_ref().map(serde_json::Value::to_string))
+  .bind(to_epoch_millis(now))
+  .bind(into.to_string())
+  .bind(bank.to_string())
+  .execute(&mut **tx)
+  .await
+  .map_err(|error| map_write("entity", error))?;
+
+  if updated.rows_affected() == 0 {
+    return Err(Error::fatal(format!(
+      "entity merge lost target {into} inside bank {bank}"
+    )));
+  }
+
+  let deleted = sqlx::query("DELETE FROM entity WHERE id = ? AND bank_id = ?")
+    .bind(from.to_string())
+    .bind(bank.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("entity", error))?;
+
+  if deleted.rows_affected() == 0 {
+    return Err(Error::fatal(format!(
+      "entity merge lost source {from} inside bank {bank}"
+    )));
+  }
+
+  Ok(())
+}
+
+/// Adds the source id to `merged_from` while preserving existing object attrs.
+fn merge_entity_attrs(
+  into_attrs: Option<serde_json::Value>,
+  from_attrs: Option<serde_json::Value>,
+  from: EntityId,
+) -> Option<serde_json::Value> {
+  use serde_json::{Map, Value};
+
+  let mut map = match into_attrs {
+    Some(Value::Object(map)) => map,
+    Some(other) => {
+      let mut map = Map::new();
+      map.insert("previous_attrs".to_string(), other);
+      map
+    }
+    None => Map::new(),
+  };
+
+  let mut merged = match map.remove("merged_from") {
+    Some(Value::Array(values)) => values,
+    Some(other) => vec![other],
+    None => Vec::new(),
+  };
+  // Preserve the source's own merge history so A→B→C keeps both A and B.
+  if let Some(Value::Object(mut from_map)) = from_attrs
+    && let Some(history) = from_map.remove("merged_from")
+  {
+    match history {
+      Value::Array(values) => merged.extend(values),
+      other => merged.push(other),
+    }
+  }
+  merged.push(Value::String(from.to_string()));
+  map.insert("merged_from".to_string(), Value::Array(merged));
+
+  Some(Value::Object(map))
 }
 
 /// Executes tx2: writes every product and flips the chunk status under the

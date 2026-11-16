@@ -6,7 +6,7 @@ use std::time::Duration;
 use engine::ports::{Clock, Embedder, Llm, NewChunk, SourceProgress, Store, now_ts};
 use engine::retain::{ChunkConfig, RawPayload, chunk, normalize};
 use engine::tokens::CharHeuristic;
-use engine::types::{BankId, ChunkId, Source, SourceId, SourceStatus};
+use engine::types::{BankId, ChunkId, EntityId, Source, SourceId, SourceStatus};
 use engine::{Error, Result};
 use tokio::sync::Notify;
 
@@ -113,6 +113,16 @@ impl MemoryBank {
   pub fn with_worker_config(mut self, worker: WorkerConfig) -> Self {
     self.worker = worker;
     self
+  }
+
+  /// Merges canonical entity `from` into `into` in one maintenance transaction.
+  ///
+  /// Used to consolidate duplicates created by wording differences. Bindings
+  /// move to the survivor, statistics are recomputed, the source id is recorded
+  /// in `into.attrs.merged_from`, and the source row is deleted.
+  pub async fn merge_entities(&self, bank: BankId, from: EntityId, into: EntityId) -> Result<()> {
+    let now = now_ts(self.clock.as_ref());
+    self.store.merge_entities(bank, from, into, now).await
   }
 
   /// Ingests a payload (async ack).

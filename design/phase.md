@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 18/20 · P2 0/10 · P3 0/8 · P4 0/8 · P5 0/10 (30/68 total)**
+> Current progress: **P0 12/12 · P1 18/20 · P2 0/10 · P3 0/8 · P4 1/9 · P5 0/10 (31/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -219,6 +219,7 @@ pub enum FactScope { All, Types(Vec<FactType>) }
   // entity / opinion / observation / maintenance
   async fn ensure_entity(&self, new:NewEntity)->Result<(EntityId,bool)>;   // (id, created)
   async fn entity_candidates(&self, bank:BankId, mention:&str, limit:usize)->Result<Vec<EntityCandidate>>;
+  async fn merge_entities(&self, bank:BankId, from:EntityId, into:EntityId, now:Timestamp)->Result<()>;
   async fn insert_opinion(&self, o:NewOpinion)->Result<()>;
   async fn insert_observations(&self, o:Vec<NewObservation>)->Result<()>;
   async fn observations_of(&self, bank:BankId, entity:EntityId, limit:usize)->Result<Vec<Fact>>;
@@ -231,7 +232,8 @@ pub enum FactScope { All, Types(Vec<FactType>) }
 - **Key semantics** (documented in trait doc comments):
   - **IDs and time are engine-supplied** (`AGENTS.md`): the store never generates business IDs and never reads the wall clock; every creation DTO carries `id` and `created_at`.
   - `claim_chunk` claims atomically and reclaims stale `extracting` rows (`now - updated_at > stale_after`), refreshing `updated_at = now`; returns `None` when nothing is claimable.
-  - `commit_chunk` is the only transaction entry for extraction products: facts / bindings / links / entity stats / opinion updates / the optional `bank.background` CAS / status→done (`completed_at`) commit together. If a listed entity hits `UNIQUE(bank_id, canonical_name)`, the store reuses the existing row and rewrites the bindings that referenced the new id.
+  - `commit_chunk` is the only transaction entry for **extraction products**: facts / bindings / links / entity stats / opinion updates / the optional `bank.background` CAS / status→done (`completed_at`) commit together. If a listed entity hits `UNIQUE(bank_id, canonical_name)`, the store reuses the existing row and rewrites the bindings that referenced the new id. Maintenance operations (`gc_observations`, `merge_entities`) own separate transactions; they are not extraction products.
+  - `merge_entities` moves every `fact_entity` binding from `from` to `into` (dropping source bindings whose `(fact_id, into)` already exists), recomputes `mention_count`/`first_seen`/`last_seen` from the surviving world/experience bindings, records the source id in `into.attrs.merged_from`, and deletes the source row. Both entities must belong to the bank; `from == into` is `Config`.
   - `append_chunks` skips any chunk whose `(bank_id, content_hash)` already exists and returns the inserted count.
   - Retrieval methods take a `FactScope` (`All` or a `Types` subset) so the target network semantics of paper eqs. (9)–(11) are expressed at the port; empty `Types` means no facts.
   - `neighbors` merges `fact_link` rows with adjacency derived from `fact_entity` (weight 1.0, `NeighborKind::Entity`); the pairwise closure is never materialized. Four kinds are reported because P2-3 applies a distinct `mu` per kind.
@@ -442,7 +444,7 @@ pub fn fact_attrs(extracted:&ExtractedFact) -> Option<serde_json::Value>  // str
 
 ## P1-9 Entity Resolution ρ
 
-**Status**: ✅ (2026-10-29; tx2 creation boundary fixed 2026-11-10)
+**Status**: ✅ (2026-10-29; tx2 creation boundary fixed 2026-11-10; config validation 2026-11-16)
 
 - **Content**: exact hit → three-feature fuzzy match → a new-entity proposal that tx2 inserts.
 - **Design**:
@@ -452,6 +454,7 @@ pub struct ResolveWeights { pub alpha: f32, pub beta: f32, pub gamma: f32,
 // defaults: 0.6 / 0.2 / 0.2 / 0.75 / 30 days / 500
 pub struct MentionContext { pub co_mentioned: Vec<EntityId>, pub at: Option<Timestamp> }
 pub struct ResolvedEntity { pub id: EntityId, pub new_entity: Option<NewEntity> }
+impl ResolveWeights { pub fn validate(&self)->Result<()> }
 pub async fn resolve(store:&dyn Store, bank:BankId, mention:&EntityMention,
                      ctx:&MentionContext, w:&ResolveWeights, now:Timestamp,
                      pending:&[NewEntity]) -> Result<ResolvedEntity>
@@ -462,9 +465,10 @@ pub fn temporal_sim(cand:&EntityCandidate, at:Option<Timestamp>, scale:Duration)
 ```
 - **Candidate shortlist** (`Store::entity_candidates(bank, mention, limit)`): exact canonical-name and `mention_text` variant matches first, then the bank's top entities by `mention_count`, capped at `limit`. `EntityCandidate.co_mentioned` is a bounded sample of entities sharing a fact with the candidate (fact ids are UUIDv7, so recent-first). Fuzzy scoring runs on this shortlist; `sim_str` takes the best score over the canonical name and all variants. Proposals from earlier mentions in the same chunk (`pending`) are appended as zero-evidence candidates, so exact/fuzzy matching cannot split one name into several proposals.
 - **Scoring**: weighted sum over **available** features, divided by the sum of their weights (a missing co-occurrence/temporal signal does not depress the score). Empty mention after normalization → `Error::Config`.
+- **Validation**: `ResolveWeights::validate` requires `alpha > 0`, finite non-negative `beta`/`gamma`, `threshold ∈ [0, 1]`, positive `temporal_scale`, and `candidate_limit > 0`; `resolve` calls it before scoring. The threshold remains a deliberate deviation from paper eq. (2) (pure argmax): without it, a genuinely new mention would be forced onto the highest-scoring entity.
 - **Creation**: below the threshold → `ResolvedEntity { id, new_entity: Some(NewEntity) }`; **nothing is written**. `entity_type = mention.kind.unwrap_or(Other)`; `created_at = now` (the only clock use). The worker puts proposals into `ChunkCommit.entities`; tx2 inserts them with `ON CONFLICT(bank_id, canonical_name) DO NOTHING`, and a conflict remaps the proposer's bindings/statistics to the winning row.
 - **Acceptance**: `resolve` performs no writes; entity rows are created only in tx2; the same mention always resolves to the same entity; concurrent creation of one name converges through the tx2 conflict path; empty mention rejected.
-- **Tests**: exact/fuzzy-typo/threshold/new-entity proposal paths; pending exact/fuzzy reuse; variant and co-mention candidates; candidate ordering and limit; empty mention; no entity row before tx2; concurrent resolution of an existing name is stable.
+- **Tests**: exact/fuzzy-typo/threshold/new-entity proposal paths; pending exact/fuzzy reuse; variant and co-mention candidates; candidate ordering and limit; empty mention; no entity row before tx2; concurrent resolution of an existing name is stable; invalid weight/threshold/limit configurations are rejected.
 
 ## P1-10 Entity Statistics
 
@@ -1014,6 +1018,35 @@ impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:Recal
 **Status**: ❌
 
 - **Tests**: observation append/reclaim, GC × recall interaction, entity profile API.
+
+## P4-9 Entity Merge
+
+**Status**: ✅ (2026-11-16)
+
+- **Content**: a manual/programmatic consolidation path for duplicate canonical
+  entities created by wording differences (the resolution threshold prevents
+  false merges, at the cost of possible duplicates).
+- **Design**:
+```rust
+async fn merge_entities(&self, bank:BankId, from:EntityId, into:EntityId,
+                        now:Timestamp) -> Result<()>;
+impl MemoryBank { pub async fn merge_entities(&self, bank, from, into) -> Result<()> }  // injected Clock
+```
+  One maintenance transaction: delete source bindings whose `(fact_id, into)`
+  already exist; move the remaining `fact_entity` rows to `into`; merge
+  `entity_type` (specific wins over `Other`); recompute
+  `mention_count`/`first_seen`/`last_seen` from the surviving world/experience
+  bindings; append `from` (and its own `merged_from` history) to `into.attrs.merged_from`;
+  delete the `from` row.
+  `from == into` is `Config`; missing/cross-bank ids are `NotFound`. Observation
+  and opinion bindings move with the rest; `fact_link` is untouched because
+  entity adjacency is derived.
+- **Acceptance**: no dangling `fact_entity` rows; surviving stats equal the
+  world/experience binding count; source row and its canonical name are gone;
+  provenance is inspectable in `attrs`.
+- **Tests**: binding move + same-fact dedup; stats recompute; type upgrade from
+  `Other`; observation binding move; provenance chain; self-merge and cross-bank
+  rejection; facade clock stamping.
 
 ---
 

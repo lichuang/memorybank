@@ -154,6 +154,21 @@ pub trait Store: Send + Sync {
     limit: usize,
   ) -> Result<Vec<EntityCandidate>>;
 
+  /// Merges `from` into `into` in one maintenance transaction.
+  ///
+  /// All `fact_entity` bindings move to `into` (a binding for a fact already
+  /// bound to `into` is dropped), statistics are recomputed from the surviving
+  /// world/experience bindings, `into.attrs.merged_from` records the source id,
+  /// and the `from` row is deleted. Both entities must belong to `bank`;
+  /// `from == into` is an [`crate::Error::Config`] error.
+  async fn merge_entities(
+    &self,
+    bank: BankId,
+    from: EntityId,
+    into: EntityId,
+    now: Timestamp,
+  ) -> Result<()>;
+
   /// Writes an opinion row and its `fact_entity` bindings in one transaction.
   async fn insert_opinion(&self, opinion: NewOpinion) -> Result<()>;
 
@@ -627,6 +642,15 @@ mod tests {
       _mention: &str,
       _limit: usize,
     ) -> Result<Vec<EntityCandidate>> {
+      unreachable!("stub")
+    }
+    async fn merge_entities(
+      &self,
+      _bank: BankId,
+      _from: EntityId,
+      _into: EntityId,
+      _now: Timestamp,
+    ) -> Result<()> {
       unreachable!("stub")
     }
     async fn insert_opinion(&self, _opinion: NewOpinion) -> Result<()> {

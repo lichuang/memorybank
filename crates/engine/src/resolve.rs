@@ -44,6 +44,39 @@ impl Default for ResolveWeights {
   }
 }
 
+impl ResolveWeights {
+  /// Validates the configured weights.
+  ///
+  /// `alpha` must be positive because string similarity is the only feature
+  /// available for every mention; a zero/NaN weight set would make the score
+  /// meaningless and can turn the threshold into a catch-all. `beta`/`gamma`
+  /// may be zero to disable a feature.
+  pub fn validate(&self) -> Result<()> {
+    if !self.alpha.is_finite() || self.alpha <= 0.0 {
+      return Err(Error::config(
+        "resolve alpha must be finite and greater than 0",
+      ));
+    }
+    for (name, value) in [("beta", self.beta), ("gamma", self.gamma)] {
+      if !value.is_finite() || value < 0.0 {
+        return Err(Error::config(format!(
+          "resolve {name} must be finite and non-negative"
+        )));
+      }
+    }
+    if !self.threshold.is_finite() || !(0.0..=1.0).contains(&self.threshold) {
+      return Err(Error::config("resolve threshold must be in [0, 1]"));
+    }
+    if self.temporal_scale.is_zero() {
+      return Err(Error::config("resolve temporal_scale must be positive"));
+    }
+    if self.candidate_limit == 0 {
+      return Err(Error::config("resolve candidate_limit must be positive"));
+    }
+    Ok(())
+  }
+}
+
 /// What is already known about the mention being resolved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MentionContext {
@@ -83,6 +116,7 @@ pub async fn resolve(
   now: Timestamp,
   pending: &[NewEntity],
 ) -> Result<ResolvedEntity> {
+  weights.validate()?;
   let canonical = normalize_name(&mention.text);
   if canonical.is_empty() {
     return Err(Error::config("entity mention is empty after normalization"));
@@ -373,6 +407,62 @@ mod tests {
       (typo - 10.0 / 11.0).abs() < 1e-6,
       "missing features are renormalized out"
     );
+  }
+
+  #[test]
+  fn default_weights_are_valid() {
+    assert!(ResolveWeights::default().validate().is_ok());
+  }
+
+  #[test]
+  fn invalid_weights_are_rejected() {
+    for weights in [
+      ResolveWeights {
+        alpha: 0.0,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        alpha: -0.1,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        alpha: f32::NAN,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        beta: -0.1,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        gamma: f32::NAN,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        threshold: -0.1,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        threshold: 1.1,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        threshold: f32::NAN,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        temporal_scale: Duration::ZERO,
+        ..ResolveWeights::default()
+      },
+      ResolveWeights {
+        candidate_limit: 0,
+        ..ResolveWeights::default()
+      },
+    ] {
+      assert!(
+        matches!(weights.validate(), Err(Error::Config(_))),
+        "weights: {weights:?}"
+      );
+    }
   }
 
   #[test]

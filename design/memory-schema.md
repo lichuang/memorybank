@@ -190,6 +190,8 @@ Conditional constraints:
 
 > Creation boundary: retain creates entity rows only inside A1's tx2 (`ChunkCommit.entities`). Resolution returns proposals and performs no writes, so a failed chunk cannot leave `mention_count=0` orphans; an explicit standalone `ensure_entity` call is the non-retain escape hatch.
 
+> Merge boundary: `merge_entities(bank, from, into, now)` consolidates two canonical rows in one maintenance transaction — dedupe overlapping `fact_entity` rows, move the rest to `into`, recompute `mention_count`/`first_seen`/`last_seen` from surviving world/experience bindings, append `from` to `into.attrs.merged_from`, delete the source row. `fact_link` is untouched because entity adjacency is derived.
+
 ### 3.6 `fact_entity` — Fact ↔ Entity (N:M)
 
 **Purpose**: the landing place for the paper's extracted canonical entity set E, and the **physical source of entity adjacency**. It underpins four things: ① carrying entity adjacency (the pairwise closure of rows sharing an entity is derived here; `fact_link` does not materialize it; traversal/spreading activation reverse-looks-up bindings); ② retrieving Fe and observation batches by entity during recall; ③ finding opinion reinforcement candidates by entity overlap (O_cand criterion 1); ④ carrying bindings for observation regeneration.

@@ -136,6 +136,8 @@ pub trait Store: Send + Sync {
     async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)>;               // (id, created); UNIQUE conflict reuses
     async fn fetch_entities(&self, ids: &[EntityId]) -> Result<Vec<Entity>>;
     async fn entity_candidates(&self, bank: BankId, mention: &str, limit: usize) -> Result<Vec<EntityCandidate>>;
+    async fn merge_entities(&self, bank: BankId, from: EntityId, into: EntityId, now: Timestamp)
+        -> Result<()>;                                                                       // maintenance tx
     async fn insert_opinion(&self, op: NewOpinion) -> Result<()>;
     async fn insert_observations(&self, obs: Vec<NewObservation>) -> Result<()>;
     async fn observations_of(&self, bank: BankId, entity: EntityId, limit: usize) -> Result<Vec<Fact>>;
@@ -149,7 +151,7 @@ pub trait Store: Send + Sync {
 
 Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 
-1. **`commit_chunk` is the only transaction entry**: atomicity is guaranteed by the trait method; transaction objects never leak, so engine does not need to understand each backend's transaction API. The optional `background_update` (A3) rides in the same `ChunkCommit`, so a background merge and its facts cannot diverge.
+1. **`commit_chunk` is the only transaction entry for extraction products**: atomicity is guaranteed by the trait method; transaction objects never leak, so engine does not need to understand each backend's transaction API. The optional `background_update` (A3) rides in the same `ChunkCommit`, so a background merge and its facts cannot diverge. Maintenance paths (`gc_observations`, `merge_entities`) own their own single-purpose transactions.
 2. **IDs and time are engine-supplied** (`AGENTS.md`): the store never generates business IDs and never reads the wall clock; every creation DTO carries `id` and `created_at`, and methods that need "now" take it as a parameter.
 3. **`neighbors()` merges multiple sources inside the adapter**: `fact_link` rows + entity adjacency derived from `fact_entity` (the closure is never materialized) — criterion 3, "single source of truth". The result reports four kinds (`NeighborKind` includes `Entity`) because P2-3 applies a distinct µ per kind.
 4. **Work lists are always derived**: `pending_work` returns sources awaiting chunking, chunks pending/stale-claim, facts without a `fact_vec` row, and entities whose evidence changed (`entity.last_seen > latest observation row's created_at`). There is no task-queue table — criterion 2, "strategies live at runtime".
@@ -162,7 +164,7 @@ Deliberate contract trade-offs (all map to the schema's §1.3 criteria):
 - Capability boundaries (read / write / maintenance) are *behavioral*, not *structural*: the same adapter owns the tables, and splitting would hand the engine two or three handles to the same connection pool without buying isolation.
 - The composition would be a supertrait (`trait Store: StoreRead + StoreWrite + StoreMaintenance`) if it ever happens, so call sites typed as `&dyn Store` survive the split unchanged.
 
-**Split trigger (recorded, not planned):** split when a consumer genuinely needs only a subset — e.g. a read-only serving replica (`search_*` / `fetch_facts` only), a maintenance worker running with narrower credentials (`pending_work` / `update_embeddings` / `gc_observations`), or a third-party adapter that can implement retrieval but not ingestion. The cut is then `StoreRead` (`load_bank`, `list_banks`, `load_source`, `search_vector`, `search_bm25`, `neighbors`, `facts_in_range`, `fetch_facts`, `observations_of`, `entity_candidates`, `fetch_entities`, `source_progress`) / `StoreWrite` (`create_bank`, `create_source`, `append_chunks`, `claim_chunk`, `release_chunk`, `fail_chunk`, `commit_chunk`, `ensure_entity`, `insert_opinion`, `insert_observations`, `update_embeddings`, `increment_access`) / `StoreMaintenance` (`pending_work`, `gc_observations`), with `commit_chunk` remaining the only transaction entry.
+**Split trigger (recorded, not planned):** split when a consumer genuinely needs only a subset — e.g. a read-only serving replica (`search_*` / `fetch_facts` only), a maintenance worker running with narrower credentials (`pending_work` / `update_embeddings` / `gc_observations`), or a third-party adapter that can implement retrieval but not ingestion. The cut is then `StoreRead` (`load_bank`, `list_banks`, `load_source`, `search_vector`, `search_bm25`, `neighbors`, `facts_in_range`, `fetch_facts`, `observations_of`, `entity_candidates`, `fetch_entities`, `source_progress`) / `StoreWrite` (`create_bank`, `create_source`, `append_chunks`, `claim_chunk`, `release_chunk`, `fail_chunk`, `commit_chunk`, `ensure_entity`, `insert_opinion`, `insert_observations`, `update_embeddings`, `increment_access`) / `StoreMaintenance` (`pending_work`, `gc_observations`, `merge_entities`), with `commit_chunk` remaining the only extraction transaction entry.
 
 ## 2. Pipeline Implementation Notes
 
@@ -213,6 +215,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 
 - Normalize the mention → exact hit on `entity.canonical_name` (index lookup); on miss, use the three-feature ρ (string / co-occurrence / temporal); variants are derived from `fact_entity.mention_text` (cached in memory per call, no cache table).
 - Resolution is read-only: a miss returns `ResolvedEntity { id, new_entity: Some(..) }`, and proposals from earlier mentions in the chunk join the candidate set. Entity rows are inserted only by `commit_chunk` (tx2), together with bindings and statistics; a `UNIQUE(bank_id, canonical_name)` conflict reuses the winning id and remaps the proposer's bindings/statistics. `ensure_entity` remains a standalone store API for non-retain callers.
+- Paper eq. (2) is pure argmax; the implementation adds a configurable similarity threshold so a genuinely new mention is not forced onto the best-scoring entity. That trade-off can leave duplicate canonical entities after wording changes, so `merge_entities` provides the consolidation path: bindings move, statistics are recomputed from surviving evidence, and the source id is recorded in `attrs.merged_from`. Automatic duplicate detection/scheduling is not part of this task.
 
 ### 2.6 link (Link Construction)
 
