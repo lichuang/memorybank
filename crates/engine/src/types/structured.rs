@@ -14,7 +14,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{CausalRelation, EntityKind, FactType, Timestamp};
+use super::{CausalRelation, EntityKind, ExtractionFactType, Timestamp};
 
 /// One fact proposed by the extraction model.
 ///
@@ -33,8 +33,9 @@ pub struct ExtractedFact {
   pub who: String,
   /// Why it happened.
   pub why: String,
-  /// Memory network this fact belongs to.
-  pub fact_type: FactType,
+  /// Extraction target network. Observation is deliberately absent: those rows
+  /// are synthesized, never extracted.
+  pub fact_type: ExtractionFactType,
   /// Initial belief strength for an opinion fact (`0..=1`); `None` for
   /// world/experience facts. The extraction pass defaults a missing/invalid
   /// opinion confidence to `ExtractionConfig::default_opinion_confidence`.
@@ -205,13 +206,16 @@ mod tests {
       .and_then(Value::as_object)
       .expect("definitions");
     let fact_type = defs
-      .get("FactType")
-      .expect("FactType definition")
-      .to_string();
-    assert!(
-      fact_type.contains("\"world\""),
-      "fact_type schema should reuse the enum wire names: {fact_type}"
-    );
+      .get("ExtractionFactType")
+      .expect("ExtractionFactType definition");
+    let values: Vec<&str> = fact_type
+      .get("oneOf")
+      .and_then(Value::as_array)
+      .expect("enum variants")
+      .iter()
+      .filter_map(|variant| variant.get("const").and_then(Value::as_str))
+      .collect();
+    assert_eq!(values, vec!["world", "experience", "opinion"]);
   }
 
   #[test]
@@ -236,7 +240,7 @@ mod tests {
       where_: "Berlin".into(),
       who: "who".into(),
       why: "why".into(),
-      fact_type: FactType::World,
+      fact_type: ExtractionFactType::World,
       confidence: None,
       occurred_start: None,
       occurred_end: None,
@@ -295,6 +299,7 @@ mod tests {
       r#"{"facts": {}}"#,
       r#"{"facts": [{"what": "w", "when": "w", "where": "w", "who": "w", "why": "w", "fact_type": "nonsense"}]}"#,
       r#"{"facts": [{"what": "w", "when": "w", "where": "w", "who": "w", "why": "w", "fact_type": "world", "occurred_start": "not-a-date"}]}"#,
+      r#"{"facts": [{"what": "w", "when": "w", "where": "w", "who": "w", "why": "w", "fact_type": "observation"}]}"#,
     ] {
       assert!(
         serde_json::from_str::<FactExtractionResponse>(fixture).is_err(),

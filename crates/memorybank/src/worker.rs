@@ -245,7 +245,7 @@ impl MemoryBank {
       facts.push(Fact {
         id: FactId::new(),
         bank_id: bank,
-        fact_type: extracted.fact_type,
+        fact_type: extracted.fact_type.into(),
         text: fact_text(extracted),
         embedding: None,
         chunk_id: Some(chunk.id),

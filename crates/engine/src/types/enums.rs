@@ -77,8 +77,8 @@ macro_rules! wire_enum {
 
 /// The four memory networks from the paper (the `fact_type` column).
 ///
-/// Extraction produces `World`, `Experience`, and `Opinion` rows; `Observation`
-/// rows come only from the observation synthesis pipeline (paper A.5.1).
+/// The extraction contract uses [`ExtractionFactType`] (three values); only
+/// synthesized observation rows use `Observation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FactType {
@@ -90,6 +90,32 @@ pub enum FactType {
   Opinion,
   /// Preference-neutral entity summaries.
   Observation,
+}
+
+/// The three networks the extraction pipeline may assign (paper A.5.1).
+///
+/// Observation rows are synthesized, never extracted. Keeping this as a
+/// separate enum makes the JSON Schema reject `"observation"` during
+/// deserialization instead of silently discarding a fact after extraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionFactType {
+  /// Objective facts about the external world.
+  World,
+  /// The agent's own experiences and actions.
+  Experience,
+  /// Subjective judgments with confidence scores.
+  Opinion,
+}
+
+impl From<ExtractionFactType> for FactType {
+  fn from(value: ExtractionFactType) -> Self {
+    match value {
+      ExtractionFactType::World => Self::World,
+      ExtractionFactType::Experience => Self::Experience,
+      ExtractionFactType::Opinion => Self::Opinion,
+    }
+  }
 }
 
 /// Edge types materialized in `fact_link`.
@@ -175,6 +201,12 @@ wire_enum!(FactType, "fact_type", {
   Observation => "observation",
 });
 
+wire_enum!(ExtractionFactType, "fact_type", {
+  World => "world",
+  Experience => "experience",
+  Opinion => "opinion",
+});
+
 wire_enum!(LinkType, "link_type", {
   Temporal => "temporal",
   Semantic => "semantic",
@@ -227,6 +259,8 @@ mod tests {
   fn enums_use_snake_case_wire_names() {
     assert_wire_name(FactType::World, "world");
     assert_wire_name(FactType::Observation, "observation");
+    assert_wire_name(ExtractionFactType::World, "world");
+    assert_wire_name(ExtractionFactType::Opinion, "opinion");
     assert_wire_name(LinkType::Semantic, "semantic");
     assert_wire_name(ChunkStatus::Extracting, "extracting");
     assert_wire_name(CausalRelation::CausedBy, "caused_by");
@@ -250,6 +284,9 @@ mod tests {
     assert_round_trip(FactType::Experience, "experience");
     assert_round_trip(FactType::Opinion, "opinion");
     assert_round_trip(FactType::Observation, "observation");
+    assert_round_trip(ExtractionFactType::World, "world");
+    assert_round_trip(ExtractionFactType::Experience, "experience");
+    assert_round_trip(ExtractionFactType::Opinion, "opinion");
     assert_round_trip(LinkType::Temporal, "temporal");
     assert_round_trip(LinkType::Semantic, "semantic");
     assert_round_trip(LinkType::Causal, "causal");

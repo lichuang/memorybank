@@ -166,7 +166,7 @@ fn normalize_whitespace(value: &str) -> String {
 mod tests {
   use super::*;
   use crate::testing::timestamp;
-  use crate::types::{BankId, ChunkId, ChunkStatus, ExtractedFact, FactType, SourceId};
+  use crate::types::{BankId, ChunkId, ChunkStatus, ExtractedFact, ExtractionFactType, SourceId};
 
   fn chunk(time_start: Option<i64>, time_end: Option<i64>) -> Chunk {
     Chunk {
@@ -191,7 +191,7 @@ mod tests {
       where_: "Berlin".into(),
       who: "Emily".into(),
       why: "career growth".into(),
-      fact_type: FactType::World,
+      fact_type: ExtractionFactType::World,
       confidence: None,
       occurred_start: None,
       occurred_end: None,

@@ -299,7 +299,7 @@ Key points:
 | ExtractedFact field (paper A.5.1) | Lands in |
 |---|---|
 | the five dimensions (what/when/where/who/why) woven into one narrative; dimensions missing from `what` are appended deterministically | `fact.text`; structured copies in `fact.attrs` |
-| fact_type | `fact.fact_type` (world/experience/opinion) |
+| fact_type (`ExtractionFactType`, three values) | `fact.fact_type` (world/experience/opinion; observation is never extracted) |
 | occurred_start / occurred_end (normalized absolute times) | `fact.occurred_start` / `occurred_end` |
 | mentioned_at | `fact.mentioned_at` |
 | entities[] (mention list) | `fact_entity` (mention → resolved canonical entity) |

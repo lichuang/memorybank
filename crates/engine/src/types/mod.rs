@@ -9,7 +9,8 @@ pub mod structured;
 pub mod time;
 
 pub use enums::{
-  CausalRelation, ChunkStatus, EntityKind, EnumParseError, FactType, LinkType, SourceStatus,
+  CausalRelation, ChunkStatus, EntityKind, EnumParseError, ExtractionFactType, FactType, LinkType,
+  SourceStatus,
 };
 pub use id::{BankId, ChunkId, EntityId, FactId, IdParseError, LinkId, SourceId};
 pub use interval::{ClosedInterval, IntervalError, OccurrenceInterval};

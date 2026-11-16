@@ -50,12 +50,13 @@ pub fn now_ts(clock:&dyn Clock) -> Timestamp
 
 ## P0-3 Domain Enums and Structs
 
-**Status**: ✅ (2026-10-25)
+**Status**: ✅ (2026-10-25; extraction type split 2026-11-13)
 
 - **Content**: all core enums/row structs.
 - **Design**:
 ```rust
 pub enum FactType { World, Experience, Opinion, Observation }
+pub enum ExtractionFactType { World, Experience, Opinion }   // A.5.1 extraction contract
 pub enum LinkType { Temporal, Semantic, Causal }
 pub enum ChunkStatus { Pending, Extracting, Done, Failed }
 pub enum CausalRelation { Causes, CausedBy, Enables, Prevents }   // kept as-is; relation expresses direction
@@ -86,13 +87,14 @@ pub struct FactLink { id, bank_id, from_fact_id, to_fact_id, link_type: LinkType
 
 ## P0-4 Structured Output DTOs (paper A.5.1/A.2/A.3)
 
-**Status**: ✅ (2026-10-25)
+**Status**: ✅ (2026-10-25; three-value extraction enum 2026-11-13)
 
 - **Content**: LLM round-trip contracts + JSON Schema (schemars).
 - **Design**:
 ```rust
+pub enum ExtractionFactType { World, Experience, Opinion }   // no Observation: synthesized only
 pub struct ExtractedFact { pub what: String, pub when: String, pub where_: String, pub who: String,
-  pub why: String, pub fact_type: FactType, pub confidence: Option<f32>,
+  pub why: String, pub fact_type: ExtractionFactType, pub confidence: Option<f32>,
   pub occurred_start: Option<Timestamp>, pub occurred_end: Option<Timestamp>,
   pub mentioned_at: Option<Timestamp>,
   pub entities: Vec<EntityMention>, pub causal_relations: Vec<CausalRef>, pub context: Option<String> }
@@ -395,7 +397,7 @@ RETURNING *;
 
 ## P1-7 Extraction Call
 
-**Status**: ✅ (2026-10-29)
+**Status**: ✅ (2026-10-29; schema-level observation rejection 2026-11-13)
 
 - **Content**: A.1 prompt + schema + parse validation.
 - **Design**:
@@ -409,11 +411,11 @@ pub fn validate_extracted(f: &ExtractedFact) -> Option<&'static str>   // reason
 //         used as the system message; user = chunk.text; schema_name = "fact_extraction"
 // schema: schema_for!(FactExtractionResponse), passed as request data
 ```
-- **Validation scope**: `fact_type` is a typed enum, so an invalid value fails deserialization of the whole response (adapter repair may fix it; otherwise `Fatal`). Per-fact checks are semantic: non-empty `what`; observation rows are rejected (they are synthesized, not extracted); empty entity mentions are dropped. Opinion facts carry an initial `confidence` (0..1); a missing or out-of-range value falls back to `default_opinion_confidence` (0.5), and non-opinion facts never carry one.
+- **Validation scope**: `fact_type` is the three-value `ExtractionFactType`; `"observation"` (and any other unknown value) fails deserialization of the whole response (adapter repair may fix it; otherwise `Fatal`) instead of dropping a single fact after extraction. Per-fact checks are semantic: non-empty `what`; empty entity mentions are dropped. Opinion facts carry an initial `confidence` (0..1); a missing or out-of-range value falls back to `default_opinion_confidence` (0.5), and non-opinion facts never carry one.
 - **Causal remapping**: model indices refer to the original `facts` array. After discarding invalid facts, surviving indices are remapped; references to dropped facts, out-of-range indices, and self-references are removed (logged).
 - **Oversized input**: chunk text above `max_input_chars` is truncated on a UTF-8 char boundary with a `tracing::warn` (0 disables the safety net; chunking should already bound the size).
 - **Acceptance**: invalid single facts are discarded and counted; causal references stay valid after filtering; opinion confidence is always present (fallback applied) and non-opinion facts have none; call-level retry only for `Retryable`.
-- **Tests**: FakeLlm returns 3 facts with 1 bad; causal remapping across a dropped fact; self-reference removal; observation rejection; empty result; UTF-8 truncation; schema mismatch → `Fatal`; `Retryable` propagation; opinion confidence kept, missing/invalid falls back, non-opinion confidence cleared.
+- **Tests**: FakeLlm returns 3 facts with 1 bad; causal remapping across a dropped fact; self-reference removal; observation rejected at deserialization; empty result; UTF-8 truncation; schema mismatch → `Fatal`; `Retryable` propagation; opinion confidence kept, missing/invalid falls back, non-opinion confidence cleared.
 
 ## P1-8 Time and Augmented Text
 

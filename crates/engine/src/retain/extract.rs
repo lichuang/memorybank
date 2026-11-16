@@ -11,7 +11,8 @@ use tracing::warn;
 use super::augment::normalize_time;
 use crate::ports::{JsonRequest, Llm, LlmExt};
 use crate::types::{
-  Chunk, ExtractedFact, FactExtractionResponse, FactType, IntervalError, OccurrenceInterval,
+  Chunk, ExtractedFact, ExtractionFactType, FactExtractionResponse, IntervalError,
+  OccurrenceInterval,
 };
 use crate::{Error, Result};
 
@@ -62,13 +63,15 @@ pub struct ExtractionReport {
 ///
 /// Each fact proposal first receives a mention time from the chunk
 /// (`normalize_time`; occurrence bounds are never fabricated), then is validated
-/// fact by fact: invalid facts (empty text, observation rows, reversed or
-/// end-only occurrence intervals) are counted and dropped, and causal references
+/// fact by fact: invalid facts (empty text, reversed or end-only occurrence
+/// intervals) are counted and dropped, and causal references
 /// are remapped to the surviving list (references to dropped facts, out-of-range
 /// indices, and self-references are removed). Background snippets are trimmed,
 /// deduplicated, and returned separately; they are merge input, not facts.
 /// Transport errors (timeouts, malformed JSON, schema mismatches) propagate
-/// unchanged, so the caller can retry only [`crate::Error::Retryable`].
+/// unchanged, so the caller can retry only [`crate::Error::Retryable`]. An
+/// `"observation"` fact type is rejected by the schema itself, before this
+/// function sees the response.
 pub async fn extract_facts(
   llm: &dyn Llm,
   chunk: &Chunk,
@@ -108,13 +111,10 @@ pub fn validate_extracted(fact: &ExtractedFact) -> Option<&'static str> {
   if fact.what.trim().is_empty() {
     return Some("empty `what`");
   }
-  if fact.fact_type == FactType::Observation {
-    return Some("observation rows are synthesized, not extracted");
-  }
-  if fact.fact_type == FactType::Opinion && fact.confidence.is_none() {
+  if fact.fact_type == ExtractionFactType::Opinion && fact.confidence.is_none() {
     return Some("opinion facts require `confidence`");
   }
-  if fact.fact_type != FactType::Opinion && fact.confidence.is_some() {
+  if fact.fact_type != ExtractionFactType::Opinion && fact.confidence.is_some() {
     return Some("`confidence` is only valid on opinion facts");
   }
   if let Some(confidence) = fact.confidence
@@ -132,7 +132,7 @@ pub fn validate_extracted(fact: &ExtractedFact) -> Option<&'static str> {
 }
 
 fn normalize_confidence(fact: &mut ExtractedFact, default: f32) {
-  if fact.fact_type != FactType::Opinion {
+  if fact.fact_type != ExtractionFactType::Opinion {
     if fact.confidence.is_some() {
       warn!(
         what = %fact.what,
@@ -417,19 +417,16 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn rejects_observation_facts_and_empty_entities() {
+  async fn drops_empty_entity_mentions() {
     let llm = FakeLlm::new();
     llm.push(
       "fact_extraction",
       json!({
-        "facts": [
-          {
-            "what": "world", "when": "w", "where": "w", "who": "w", "why": "w",
-            "fact_type": "world",
-            "entities": [{ "text": "  ", "kind": "person" }, { "text": "Emily", "kind": "person" }]
-          },
-          { "what": "obs", "when": "w", "where": "w", "who": "w", "why": "w", "fact_type": "observation" }
-        ]
+        "facts": [{
+          "what": "world", "when": "w", "where": "w", "who": "w", "why": "w",
+          "fact_type": "world",
+          "entities": [{ "text": "  ", "kind": "person" }, { "text": "Emily", "kind": "person" }]
+        }]
       }),
     );
 
@@ -438,9 +435,33 @@ mod tests {
       .expect("extraction");
 
     assert_eq!(report.facts.len(), 1);
-    assert_eq!(report.discarded, 1);
+    assert_eq!(report.discarded, 0);
     assert_eq!(report.facts[0].entities.len(), 1);
     assert_eq!(report.facts[0].entities[0].text, "Emily");
+  }
+
+  #[tokio::test]
+  async fn rejects_observation_at_deserialization() {
+    let llm = FakeLlm::new();
+    llm.push(
+      "fact_extraction",
+      json!({
+        "facts": [{
+          "what": "obs", "when": "w", "where": "w", "who": "w", "why": "w",
+          "fact_type": "observation"
+        }]
+      }),
+    );
+
+    let error = extract_facts(&llm, &chunk("text"), &ExtractionConfig::default())
+      .await
+      .expect_err("observation is not an extraction fact type");
+
+    assert!(matches!(error, Error::Fatal(_)), "error: {error}");
+    assert!(
+      error.to_string().contains("invalid fact_extraction output"),
+      "error: {error}"
+    );
   }
 
   fn opinion_json(what: &str, confidence: Option<f64>) -> Value {
@@ -465,7 +486,7 @@ mod tests {
       .expect("extraction");
 
     assert_eq!(report.facts.len(), 1);
-    assert_eq!(report.facts[0].fact_type, FactType::Opinion);
+    assert_eq!(report.facts[0].fact_type, ExtractionFactType::Opinion);
     assert_eq!(report.facts[0].confidence, Some(0.8));
   }
 

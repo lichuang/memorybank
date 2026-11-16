@@ -65,7 +65,7 @@ pub fn causal_links(
 mod tests {
   use super::*;
   use crate::testing::timestamp;
-  use crate::types::{CausalRef, FactType};
+  use crate::types::{CausalRef, ExtractionFactType};
 
   fn extracted(what: &str, relations: Vec<CausalRef>) -> ExtractedFact {
     ExtractedFact {
@@ -74,7 +74,7 @@ mod tests {
       where_: String::new(),
       who: String::new(),
       why: String::new(),
-      fact_type: FactType::World,
+      fact_type: ExtractionFactType::World,
       confidence: None,
       occurred_start: None,
       occurred_end: None,
