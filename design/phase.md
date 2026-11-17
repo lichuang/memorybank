@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 0/10 · P3 0/8 · P4 1/9 · P5 0/10 (32/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 1/10 · P3 0/8 · P4 1/9 · P5 0/10 (33/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -792,11 +792,24 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
 
 ## P2-1 Semantic Channel
 
-**Status**: ❌
+**Status**: ✅ (2026-11-17)
 
-- **Design**: the store search already exists (vec0 exact KNN, `FactScope` scoping). P2-1 adds the recall-level channel wrapper: call `search_vector` with the target scope, apply `min_cos` from configuration, and return the ranked ids. No brute-force reimplementation.
-- **Acceptance**: respects the target `FactScope`; `min_cos` filtering; rows without embeddings are skipped.
-- **Tests**: ordering assertions on a known vector set; empty bank returns empty.
+- **Design**: the store search already exists (vec0 exact KNN, `FactScope` scoping). This task adds `engine::recall::semantic`:
+```rust
+pub struct SemanticConfig { pub top_k: usize, pub min_cos: f32 }  // defaults: 50 / 0.0
+impl SemanticConfig { pub fn validate(&self)->Result<()> }        // min_cos finite in [-1,1]
+pub async fn semantic_channel(store:&dyn Store, bank:BankId, query:&[f32],
+                              cfg:&SemanticConfig, scope:&FactScope)
+  -> Result<Vec<(FactId,f32)>>;
+```
+  It calls `Store::search_vector(bank, query, cfg.top_k, scope)`, drops scores below
+  `min_cos` (inclusive), preserves the store's ranked order, and truncates to `top_k`.
+  `top_k = 0` is a valid disabled state and returns empty without a store call. No
+  brute-force reimplementation and no fact loading (P2-8 assembles products later).
+- **Acceptance**: respects the target `FactScope`; inclusive `min_cos` filtering; rows
+  without embeddings are skipped; empty bank / disabled channel return empty.
+- **Tests**: known-vector ordering, top-k, exact-threshold inclusion, scope isolation,
+  missing embeddings, empty bank, zero top-k, config validation.
 
 ## P2-2 BM25 Channel
 
