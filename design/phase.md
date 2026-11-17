@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 1/10 · P3 0/8 · P4 1/9 · P5 0/10 (33/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 2/10 · P3 0/8 · P4 1/9 · P5 0/10 (34/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -813,11 +813,29 @@ pub async fn semantic_channel(store:&dyn Store, bank:BankId, query:&[f32],
 
 ## P2-2 BM25 Channel
 
-**Status**: ❌
+**Status**: ✅ (2026-11-17)
 
-- **Design**: `search_bm25` with `FactScope`: split the query on whitespace/punctuation and escape terms (wrap in `"term"` quotes), then rank `fact_fts` rows; restrict to the scope by joining `fact` on `fact_type IN (...)` (or add `fact_type UNINDEXED` to the FTS table). `WHERE bank_id=? ORDER BY s LIMIT k`.
-- **Acceptance**: CJK trigram substrings match; empty query returns empty.
-- **Tests**: proper nouns/numbers match; injection-style special characters do not error.
+- **Design**: `engine::recall::bm25` wraps `Store::search_bm25`:
+```rust
+pub struct Bm25Config { pub top_k: usize }  // default 50; 0 disables
+pub async fn bm25_channel(store:&dyn Store, bank:BankId, query:&str,
+                          cfg:&Bm25Config, scope:&FactScope)
+  -> Result<Vec<(FactId,f32)>>;
+```
+  SQLite canonicalizes query terms (alphanumeric runs of at least 3 characters,
+  the trigram minimum), wraps each in quotes, and ORs them into an FTS5 `MATCH`.
+  It ranks `-bm25(fact_fts)` descending (scores are higher-is-better), filters by
+  `bank_id` and `FactScope`, and applies `top_k`; ties break by fact id. Empty
+  queries, zero `top_k`, and empty `Types` scopes return empty without a query.
+  Trigram limitations are explicit: substring semantics, no stemming/stopwords,
+  two-character terms (e.g. `AI`, `北京`) are ignored, and there is no LIKE
+  fallback. Word-level BM25 or a dual index remains a future backend option
+  (P5), not part of this task.
+- **Acceptance**: proper nouns/numbers match; CJK strings of at least three
+  characters match; special characters cannot break the query; short/empty
+  queries return empty; scope/bank/top-k are respected; scores are positive.
+- **Tests**: term frequency ordering; CJK; punctuation/injection-style inputs;
+  scope + bank isolation; top-k; short-term/empty behavior; empty Types scope.
 
 ## P2-3 Graph Channel (Spreading Activation)
 

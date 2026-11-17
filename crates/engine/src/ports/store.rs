@@ -99,6 +99,9 @@ pub trait Store: Send + Sync {
   ) -> Result<Vec<(FactId, f32)>>;
 
   /// Top-`k` facts in `scope` by lexical (BM25) similarity to `query`.
+  ///
+  /// Scores are **higher-is-better** so both retrieval channels share one
+  /// convention. Adapters choose their tokenizer; SQLite uses FTS5 trigrams.
   async fn search_bm25(
     &self,
     bank: BankId,

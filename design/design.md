@@ -195,6 +195,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 ### 2.2 recall (Four Channels → RRF → Rerank → Budget)
 
 - The semantic channel requests `top_k` from `Store::search_vector` in the target `FactScope`, drops scores below the configured `min_cos` (inclusive), and preserves the store's ranked order; `top_k = 0` disables it.
+- The BM25 channel uses SQLite FTS5 trigrams: terms of at least three characters are quoted and OR-ed, `-bm25()` gives higher-is-better scores, and short terms are ignored. This is substring-oriented rather than the paper's word-level BM25/GIN; a dual index or word-level backend remains a future option.
 - `search_vector` / `search_bm25` run concurrently with graph expansion and temporal filtering (`try_join!`).
 - RRF: `Σ 1/(60 + rank_i)`, aggregated by fact_id.
 - Rerank: `Reranker` scores the top-N candidates (identity stub in the first version).

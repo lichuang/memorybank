@@ -430,12 +430,62 @@ impl Store for SqliteStore {
 
   async fn search_bm25(
     &self,
-    _bank: BankId,
-    _query: &str,
-    _k: usize,
-    _scope: &FactScope,
+    bank: BankId,
+    query: &str,
+    k: usize,
+    scope: &FactScope,
   ) -> Result<Vec<(FactId, f32)>> {
-    Err(not_implemented("search_bm25"))
+    if k == 0 {
+      return Ok(Vec::new());
+    }
+    if let FactScope::Types(types) = scope
+      && types.is_empty()
+    {
+      return Ok(Vec::new());
+    }
+
+    // FTS5's trigram tokenizer indexes 3-character sequences; a query term
+    // shorter than that cannot match. Terms are OR-ed to keep the lexical
+    // channel recall-oriented.
+    let match_expression = bm25_match_expression(query);
+    if match_expression.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let mut statement = QueryBuilder::<Sqlite>::new(
+      "SELECT f.id, -bm25(fact_fts) AS score FROM fact_fts \
+       JOIN fact f ON f.id = fact_fts.fact_id WHERE fact_fts MATCH ",
+    );
+    statement.push_bind(match_expression);
+    statement.push(" AND f.bank_id = ");
+    statement.push_bind(bank.to_string());
+
+    if let FactScope::Types(types) = scope {
+      statement.push(" AND f.fact_type IN (");
+      let mut separated = statement.separated(", ");
+      for fact_type in types {
+        separated.push_bind(fact_type.as_str());
+      }
+      statement.push(")");
+    }
+
+    statement.push(" ORDER BY score DESC, f.id ASC LIMIT ");
+    statement.push_bind(i64::try_from(k).unwrap_or(i64::MAX));
+
+    let rows: Vec<(String, f64)> = statement
+      .build_query_as()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("fact_fts", error))?;
+
+    rows
+      .into_iter()
+      .map(|(id, score)| {
+        let id = FactId::parse(&id)
+          .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
+        Ok((id, score as f32))
+      })
+      .collect()
   }
 
   async fn neighbors(
@@ -1367,6 +1417,18 @@ async fn commit_chunk_tx(tx: &mut Transaction<'_, Sqlite>, commit: &ChunkCommit)
   }
 
   Ok(())
+}
+
+/// Builds an FTS5 MATCH expression from alphanumeric terms of at least three
+/// characters (the trigram minimum), OR-ed for recall.
+fn bm25_match_expression(query: &str) -> String {
+  let mut terms = Vec::new();
+  for term in query.split(|c: char| c.is_whitespace() || !c.is_alphanumeric()) {
+    if term.chars().count() >= 3 {
+      terms.push(format!("\"{}\"", term.replace('"', "\"\"")));
+    }
+  }
+  terms.join(" OR ")
 }
 
 /// Runs one scoped vec0 KNN page and converts distance to cosine similarity.
