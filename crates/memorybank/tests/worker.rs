@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use engine::link::LinkConfig;
 use engine::ports::{JsonRequest, Llm, Store};
-use engine::retain::{RawPayload, RawTurn, normalize};
+use engine::retain::{BackgroundConfig, ChunkConfig, RawPayload, RawTurn, normalize};
 use engine::testing::{FakeLlm, FixedClock, HashEmbedder, timestamp};
 use engine::types::{Bank, BankId, BankProfile, Source, SourceId, SourceStatus};
 use memorybank::{MemoryBank, PipelineConfig, RetainConfig, RetainState, WorkerConfig};
@@ -39,6 +40,16 @@ async fn setup(now: i64) -> (SqliteStore, Arc<dyn Store>, BankId, Arc<FakeLlm>) 
 }
 
 fn memory(store: Arc<dyn Store>, llm: Arc<FakeLlm>, now: i64, worker: WorkerConfig) -> MemoryBank {
+  memory_with_pipeline(store, llm, now, worker, PipelineConfig::default())
+}
+
+fn memory_with_pipeline(
+  store: Arc<dyn Store>,
+  llm: Arc<FakeLlm>,
+  now: i64,
+  worker: WorkerConfig,
+  pipeline: PipelineConfig,
+) -> MemoryBank {
   let llm: Arc<dyn engine::ports::Llm> = llm;
   MemoryBank::new(
     store,
@@ -46,7 +57,7 @@ fn memory(store: Arc<dyn Store>, llm: Arc<FakeLlm>, now: i64, worker: WorkerConf
     RetainConfig::default(),
   )
   .with_models(llm, Arc::new(HashEmbedder::new(EMBEDDING_DIM)))
-  .with_pipeline(PipelineConfig::default())
+  .with_pipeline(pipeline)
   .with_worker_config(worker)
 }
 
@@ -60,6 +71,13 @@ fn fact_json(what: &str, entity: &str) -> Value {
     "fact_type": "world",
     "entities": [{ "text": entity, "kind": "person" }]
   })
+}
+
+fn fact_json_at(what: &str, entity: &str, at: engine::types::Timestamp) -> Value {
+  let mut value = fact_json(what, entity);
+  value["occurred_start"] = json!(at.to_rfc3339());
+  value["occurred_end"] = json!(at.to_rfc3339());
+  value
 }
 
 fn payload(text: &str) -> RawPayload {
@@ -130,6 +148,226 @@ async fn retain_then_rescan_extracts_and_commits() {
   let status = memory.retain_status(bank, source).await.expect("status");
   assert_eq!(status.state, RetainState::Completed);
   assert_eq!(status.facts_written, 2);
+}
+
+#[tokio::test]
+async fn end_to_end_commits_temporal_links_and_consistent_entity_stats() {
+  let (sqlite, store, bank, llm) = setup(1_000).await;
+  let first_at = ts(1_000);
+  let second_at = ts(1_000 + 3_600_000);
+  llm.push(
+    "fact_extraction",
+    json!({
+      "facts": [
+        fact_json_at("Alice met Bob", "Alice", first_at),
+        fact_json_at("Alice called Bob", "Alice", second_at)
+      ]
+    }),
+  );
+
+  let pipeline = PipelineConfig {
+    links: LinkConfig {
+      semantic_top_k: 0,
+      ..LinkConfig::default()
+    },
+    ..PipelineConfig::default()
+  };
+  let memory = memory_with_pipeline(
+    store,
+    llm.clone(),
+    1_000,
+    WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    },
+    pipeline,
+  );
+
+  let source = memory
+    .retain(
+      bank,
+      payload("Alice met Bob, then called Bob an hour later."),
+    )
+    .await
+    .expect("retain");
+  let report = memory.rescan(bank).await.expect("rescan");
+  assert_eq!(report.chunks_processed, 1);
+  assert_eq!(report.failed, 0);
+
+  let facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("facts");
+  assert_eq!(facts, 2);
+  let vectors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact_vec")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("vectors");
+  assert_eq!(vectors, 2);
+  let fts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact_fts")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("fts");
+  assert_eq!(fts, 2);
+
+  let entities: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("entities");
+  assert_eq!(entities, 1);
+  let bindings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact_entity")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("bindings");
+  assert_eq!(bindings, 2);
+
+  let (mention_count, bound): (i64, i64) = sqlx::query_as(
+    "SELECT e.mention_count, \
+       (SELECT COUNT(*) FROM fact_entity fe WHERE fe.entity_id = e.id) \
+     FROM entity e",
+  )
+  .fetch_one(sqlite.pool())
+  .await
+  .expect("entity stats");
+  assert_eq!(
+    mention_count, bound,
+    "mention_count stays consistent with bindings"
+  );
+  assert_eq!(mention_count, 2);
+
+  let temporal: i64 =
+    sqlx::query_scalar("SELECT COUNT(*) FROM fact_link WHERE link_type = 'temporal'")
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("temporal links");
+  assert_eq!(temporal, 2, "one temporal pair is stored as two rows");
+
+  let status = memory.retain_status(bank, source).await.expect("status");
+  assert_eq!(status.state, RetainState::Completed);
+  assert_eq!(status.facts_written, 2);
+}
+
+#[tokio::test]
+async fn incremental_reingest_processes_only_new_chunks() {
+  let (sqlite, store, bank, llm) = setup(1_000).await;
+  let memory = memory(
+    store,
+    llm.clone(),
+    1_000,
+    WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    },
+  );
+
+  llm.push(
+    "fact_extraction",
+    json!({ "facts": [fact_json("first source fact", "Alice")] }),
+  );
+  let first = memory
+    .retain(bank, payload("first material"))
+    .await
+    .expect("first retain");
+  let first_report = memory.rescan(bank).await.expect("first rescan");
+  assert_eq!(first_report.chunks_processed, 1);
+
+  llm.push(
+    "fact_extraction",
+    json!({ "facts": [fact_json("second source fact", "Alice")] }),
+  );
+  let second = memory
+    .retain(bank, payload("second material"))
+    .await
+    .expect("second retain");
+  let second_report = memory.rescan(bank).await.expect("second rescan");
+  assert_eq!(
+    second_report.chunks_processed, 1,
+    "only the new source's chunk is processed"
+  );
+
+  let facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("facts");
+  assert_eq!(facts, 2);
+  let first_status = memory.retain_status(bank, first).await.expect("first");
+  assert_eq!(first_status.state, RetainState::Completed);
+  let second_status = memory.retain_status(bank, second).await.expect("second");
+  assert_eq!(second_status.state, RetainState::Completed);
+
+  let duplicate = memory
+    .retain(bank, payload("first material"))
+    .await
+    .expect("duplicate retain");
+  let duplicate_status = memory
+    .retain_status(bank, duplicate)
+    .await
+    .expect("duplicate status");
+  assert_eq!(duplicate_status.chunks_total, 0);
+  assert_eq!(duplicate_status.state, RetainState::Completed);
+  let facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("facts after duplicate");
+  assert_eq!(facts, 2, "re-ingest does not duplicate facts");
+
+  let extraction_calls = llm
+    .calls()
+    .iter()
+    .filter(|call| call.schema_name == "fact_extraction")
+    .count();
+  assert_eq!(
+    extraction_calls, 2,
+    "the zero-chunk source makes no LLM call"
+  );
+}
+
+#[tokio::test]
+async fn mixed_chunk_outcomes_report_completed_with_failures() {
+  let (sqlite, store, bank, llm) = setup(1_000).await;
+  llm.push(
+    "fact_extraction",
+    json!({ "facts": [fact_json("surviving fact", "Alice")] }),
+  );
+
+  let retain = RetainConfig {
+    chunk: ChunkConfig {
+      max_tokens: 50,
+      min_tokens: 0,
+      ..ChunkConfig::default()
+    },
+    ..RetainConfig::default()
+  };
+  let llm_port: Arc<dyn Llm> = llm.clone();
+  let memory = MemoryBank::new(store, Arc::new(FixedClock(ts(1_000))), retain)
+    .with_models(llm_port, Arc::new(HashEmbedder::new(EMBEDDING_DIM)))
+    .with_worker_config(WorkerConfig {
+      max_attempts: 1,
+      ..WorkerConfig::default()
+    });
+
+  let source = memory
+    .retain(bank, payload(&"alpha beta gamma delta ".repeat(20)))
+    .await
+    .expect("retain");
+  let report = memory.rescan(bank).await.expect("rescan");
+  assert_eq!(report.chunks_processed, 1);
+  assert!(report.failed >= 1, "the remaining chunks are dead-lettered");
+
+  let status = memory.retain_status(bank, source).await.expect("status");
+  assert_eq!(status.state, RetainState::CompletedWithFailures);
+  assert_eq!(status.chunks_done, 1);
+  assert!(status.chunks_failed >= 1);
+  assert!(
+    status.chunks_total > 1,
+    "the source produced multiple chunks"
+  );
+
+  let facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("facts");
+  assert_eq!(facts, 1);
 }
 
 #[tokio::test]
@@ -216,6 +454,12 @@ async fn stale_extraction_is_reclaimed() {
     .await
     .expect("chunk");
   assert_eq!(status, "done");
+
+  let facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("facts");
+  assert_eq!(facts, 1, "the stale claim is committed exactly once");
 }
 
 #[tokio::test]
@@ -614,6 +858,35 @@ async fn a_failed_background_merge_does_not_commit_the_chunk() {
   assert_eq!(status, "failed");
 }
 
+/// Delegates to `FakeLlm` and simulates a concurrent background update on every
+/// merge, so the tx2 CAS can never succeed.
+struct AlwaysRacingLlm {
+  inner: Arc<FakeLlm>,
+  pool: sqlx::SqlitePool,
+  bank: BankId,
+}
+
+#[async_trait]
+impl Llm for AlwaysRacingLlm {
+  async fn complete_json_raw(&self, req: JsonRequest) -> engine::Result<Value> {
+    let response = self.inner.complete_json_raw(req.clone()).await?;
+    if req.schema_name == "background_merge" {
+      sqlx::query("UPDATE bank SET background = ?, updated_at = ? WHERE id = ?")
+        .bind("I am from a racing update.")
+        .bind(1_500_i64)
+        .bind(self.bank.to_string())
+        .execute(&self.pool)
+        .await
+        .expect("racing background update");
+    }
+    Ok(response)
+  }
+
+  fn model(&self) -> &str {
+    "always-racing-llm"
+  }
+}
+
 /// Delegates to `FakeLlm`, but simulates a concurrent chunk merging once while
 /// the first background-merge call is in flight.
 struct RacingLlm {
@@ -723,4 +996,96 @@ async fn a_background_cas_conflict_is_remerged_and_retried() {
       .contains("CURRENT BACKGROUND:\nI am from a concurrent chunk."),
     "the retry re-reads the winning background"
   );
+}
+
+#[tokio::test]
+async fn a_failed_tx2_background_cas_rolls_back_all_products() {
+  let (sqlite, store, bank, llm) = setup(1_000).await;
+  llm.push(
+    "fact_extraction",
+    json!({
+      "facts": [fact_json("Alice met Bob", "Alice")],
+      "background_snippets": ["I am an engineer."]
+    }),
+  );
+  llm.push(
+    "background_merge",
+    json!({ "background": "I am an engineer." }),
+  );
+
+  let racing: Arc<dyn Llm> = Arc::new(AlwaysRacingLlm {
+    inner: llm.clone(),
+    pool: sqlite.pool().clone(),
+    bank,
+  });
+  let pipeline = PipelineConfig {
+    background: BackgroundConfig {
+      max_attempts: 1,
+      ..BackgroundConfig::default()
+    },
+    ..PipelineConfig::default()
+  };
+  let memory = MemoryBank::new(
+    store,
+    Arc::new(FixedClock(ts(1_000))),
+    RetainConfig::default(),
+  )
+  .with_models(racing, Arc::new(HashEmbedder::new(EMBEDDING_DIM)))
+  .with_pipeline(pipeline)
+  .with_worker_config(WorkerConfig {
+    max_attempts: 1,
+    ..WorkerConfig::default()
+  });
+
+  let source = memory
+    .retain(bank, payload("Alice met Bob. I am an engineer."))
+    .await
+    .expect("retain");
+  let report = memory.rescan(bank).await.expect("rescan");
+  assert_eq!(report.chunks_processed, 0);
+  assert_eq!(report.failed, 1);
+
+  let counts: [i64; 5] = [
+    sqlx::query_scalar("SELECT COUNT(*) FROM fact")
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("facts"),
+    sqlx::query_scalar("SELECT COUNT(*) FROM fact_vec")
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("vectors"),
+    sqlx::query_scalar("SELECT COUNT(*) FROM fact_entity")
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("bindings"),
+    sqlx::query_scalar("SELECT COUNT(*) FROM fact_fts")
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("fts"),
+    sqlx::query_scalar("SELECT COUNT(*) FROM fact_link")
+      .fetch_one(sqlite.pool())
+      .await
+      .expect("links"),
+  ];
+  for count in counts {
+    assert_eq!(count, 0, "the rolled-back tx2 left no products");
+  }
+  let entities: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entity")
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("entities");
+  assert_eq!(entities, 0);
+
+  let background: String = sqlx::query_scalar("SELECT background FROM bank WHERE id = ?")
+    .bind(bank.to_string())
+    .fetch_one(sqlite.pool())
+    .await
+    .expect("bank");
+  assert_eq!(
+    background, "I am from a racing update.",
+    "the failed merge did not overwrite the concurrent update"
+  );
+
+  let status = memory.retain_status(bank, source).await.expect("status");
+  assert_eq!(status.state, RetainState::Failed);
 }

@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 18/20 · P2 0/10 · P3 0/8 · P4 1/9 · P5 0/10 (31/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 0/10 · P3 0/8 · P4 1/9 · P5 0/10 (32/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -724,7 +724,7 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
 
 ## P1-19 retain Integration Tests
 
-**Status**: ❌
+**Status**: ✅ (2026-11-17)
 
 - **Content**: end-to-end matrix for the async contract.
 - **Acceptance/Tests**:
@@ -741,6 +741,11 @@ pub struct RescanReport { pub sources_chunked: usize, pub chunks_processed: usiz
     never write before tx2;
   - a crash between tx0 and tx1 recovers chunk `time_start/time_end` and fact `mentioned_at`
     from the canonical `[<ts>]` prefixes during rescan.
+- **Coverage map**: ack/status derivation in `crates/memorybank/tests/retain_api.rs`;
+  the worker pipeline, incremental re-ingest, temporal two-row/statistics consistency,
+  `CompletedWithFailures`, background atomicity, no-orphan resolution, tx2 CAS rollback,
+  and crash time recovery in `crates/memorybank/tests/worker.rs`; claim-token replay and
+  transaction rollback at the store boundary in `crates/store/tests/commit_chunk.rs`.
 
 ## P1-20 Background Merging
 
