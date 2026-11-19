@@ -113,6 +113,11 @@ pub trait Store: Send + Sync {
   /// Outgoing neighbors of `from` in `scope`: `fact_link` edges merged with
   /// entity adjacency derived from `fact_entity` bindings (weight 1.0). The
   /// pairwise closure is never materialized.
+  ///
+  /// `fact_link` rows of the same kind collapse to their strongest weight; a
+  /// fact reachable through two kinds (e.g. semantic and entity) appears once
+  /// per kind so the caller can apply a different multiplier. Results are in a
+  /// deterministic `(fact_id, kind)` order.
   async fn neighbors(&self, bank: BankId, from: FactId, scope: &FactScope)
   -> Result<Vec<Neighbor>>;
 

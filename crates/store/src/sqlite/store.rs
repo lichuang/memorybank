@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use engine::ports::{
-  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, FactScope, Neighbor, NewChunk,
-  NewEntity, NewObservation, NewOpinion, SourceProgress, Store, WorkLists,
+  ChunkCommit, ClaimedChunk, EntityCandidate, EntityStatUpdate, FactScope, Neighbor, NeighborKind,
+  NewChunk, NewEntity, NewObservation, NewOpinion, SourceProgress, Store, WorkLists,
 };
 use engine::types::{
   Bank, BankId, BankProfile, Chunk, ChunkId, ChunkStatus, Entity, EntityId, EntityKind, Fact,
@@ -490,11 +490,104 @@ impl Store for SqliteStore {
 
   async fn neighbors(
     &self,
-    _bank: BankId,
-    _from: FactId,
-    _scope: &FactScope,
+    bank: BankId,
+    from: FactId,
+    scope: &FactScope,
   ) -> Result<Vec<Neighbor>> {
-    Err(not_implemented("neighbors"))
+    if let FactScope::Types(types) = scope
+      && types.is_empty()
+    {
+      return Ok(Vec::new());
+    }
+
+    let mut links = QueryBuilder::<Sqlite>::new(
+      "SELECT l.to_fact_id, l.link_type, MAX(l.weight) AS weight \
+       FROM fact_link l JOIN fact f ON f.id = l.to_fact_id \
+       WHERE l.bank_id = ",
+    );
+    links.push_bind(bank.to_string());
+    links.push(" AND l.from_fact_id = ");
+    links.push_bind(from.to_string());
+    links.push(" AND l.to_fact_id <> ");
+    links.push_bind(from.to_string());
+    links.push(" AND f.bank_id = ");
+    links.push_bind(bank.to_string());
+    if let FactScope::Types(types) = scope {
+      links.push(" AND f.fact_type IN (");
+      let mut separated = links.separated(", ");
+      for fact_type in types {
+        separated.push_bind(fact_type.as_str());
+      }
+      links.push(")");
+    }
+    links.push(" GROUP BY l.to_fact_id, l.link_type");
+
+    let link_rows: Vec<(String, String, f64)> = links
+      .build_query_as()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("fact_link", error))?;
+
+    let mut neighbors = Vec::with_capacity(link_rows.len());
+    for (id, link_type, weight) in link_rows {
+      let fact_id = FactId::parse(&id)
+        .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
+      let kind = match link_type.as_str() {
+        "temporal" => NeighborKind::Temporal,
+        "semantic" => NeighborKind::Semantic,
+        "causal" => NeighborKind::Causal,
+        other => return Err(Error::fatal(format!("corrupt link type `{other}`"))),
+      };
+      neighbors.push(Neighbor {
+        fact_id,
+        kind,
+        weight: weight as f32,
+      });
+    }
+
+    // Entity adjacency is the pairwise closure of fact_entity, derived here on
+    // demand; one row per distinct neighbouring fact, weight 1.0.
+    let mut entities = QueryBuilder::<Sqlite>::new(
+      "SELECT DISTINCT fe2.fact_id        FROM fact_entity fe1        JOIN fact_entity fe2          ON fe2.bank_id = fe1.bank_id AND fe2.entity_id = fe1.entity_id        JOIN fact f ON f.id = fe2.fact_id        WHERE fe1.bank_id = ",
+    );
+    entities.push_bind(bank.to_string());
+    entities.push(" AND fe1.fact_id = ");
+    entities.push_bind(from.to_string());
+    entities.push(" AND fe2.fact_id <> ");
+    entities.push_bind(from.to_string());
+    entities.push(" AND f.bank_id = ");
+    entities.push_bind(bank.to_string());
+    if let FactScope::Types(types) = scope {
+      entities.push(" AND f.fact_type IN (");
+      let mut separated = entities.separated(", ");
+      for fact_type in types {
+        separated.push_bind(fact_type.as_str());
+      }
+      entities.push(")");
+    }
+
+    let entity_rows: Vec<String> = entities
+      .build_query_scalar()
+      .fetch_all(&self.pool)
+      .await
+      .map_err(|error| map_read("fact_entity", error))?;
+    for id in entity_rows {
+      let fact_id = FactId::parse(&id)
+        .map_err(|error| Error::fatal(format!("corrupt fact id `{id}`: {error}")))?;
+      neighbors.push(Neighbor {
+        fact_id,
+        kind: NeighborKind::Entity,
+        weight: 1.0,
+      });
+    }
+
+    neighbors.sort_by(|left, right| {
+      left
+        .fact_id
+        .cmp(&right.fact_id)
+        .then_with(|| neighbor_kind_rank(left.kind).cmp(&neighbor_kind_rank(right.kind)))
+    });
+    Ok(neighbors)
   }
 
   async fn facts_in_range(
@@ -1417,6 +1510,16 @@ async fn commit_chunk_tx(tx: &mut Transaction<'_, Sqlite>, commit: &ChunkCommit)
   }
 
   Ok(())
+}
+
+/// Stable order for multiple edge kinds between the same two facts.
+fn neighbor_kind_rank(kind: NeighborKind) -> u8 {
+  match kind {
+    NeighborKind::Temporal => 0,
+    NeighborKind::Semantic => 1,
+    NeighborKind::Entity => 2,
+    NeighborKind::Causal => 3,
+  }
 }
 
 /// Builds an FTS5 MATCH expression from alphanumeric terms of at least three

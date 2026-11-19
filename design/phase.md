@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 2/10 · P3 0/8 · P4 1/9 · P5 0/10 (34/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 3/10 · P3 0/8 · P4 1/9 · P5 0/10 (35/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -839,17 +839,36 @@ pub async fn bm25_channel(store:&dyn Store, bank:BankId, query:&str,
 
 ## P2-3 Graph Channel (Spreading Activation)
 
-**Status**: ❌
+**Status**: ✅ (2026-11-17)
 
 - **Design**:
 ```rust
-pub struct GraphConfig { pub delta: f32, pub mu_temporal/mu_semantic/mu_entity/mu_causal: f32,
-                         pub max_depth: u8, pub max_visits: usize }
-pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)], cfg:&GraphConfig)
-  -> Result<Vec<(FactId,f32)>>   // A(fj)=max(A(fi)*w*delta*mu(ℓ))
+pub struct GraphConfig {
+  pub delta: f32,
+  pub mu_temporal: f32, pub mu_semantic: f32, pub mu_entity: f32, pub mu_causal: f32,
+  pub max_depth: u8, pub max_visits: usize,
+}  // defaults: delta 0.5; mu 0.5 / 0.8 / 1.2 / 1.5; depth 2; visits 1000
+pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)],
+                    cfg:&GraphConfig) -> Result<Vec<(FactId,f32)>>;
 ```
-- **Acceptance**: depth/visit caps enforced; deterministic (same input, same order).
-- **Tests**: chained-graph activation decay; cycles terminate; derived entity adjacency participates.
+  Activation follows `A(fj)=max(A(fi) * w * delta * mu(kind))`: seeds are the
+  initial activations (non-positive/non-finite seeds ignored; duplicates keep
+  the max), the output includes the seeds, and results are sorted by activation
+  desc then fact id. `max_depth` counts edges from a seed; `max_visits` caps
+  expanded nodes; a candidate only re-enqueues when it strictly improves the
+  node's activation, so cycles terminate (or are bounded by the caps). `delta
+  ∈ (0,1]`; µ values are finite non-negative. The channel currently spreads over
+  `FactScope::All`.
+  `Store::neighbors` is now implemented: outgoing `fact_link` rows grouped by
+  kind (max weight) plus derived entity adjacency (weight 1.0), filtered by bank
+  and scope, in deterministic order; a fact reachable by two kinds appears once
+  per kind so the matching µ applies.
+- **Acceptance**: depth/visit caps enforced; deterministic (same input, same
+  order); cycles terminate; derived entity adjacency participates; per-kind µ
+  is applied.
+- **Tests**: chained decay; cycle termination; depth cap; visit cap; entity-only
+  adjacency; seed dedup/filtering; neighbor link/entity merge, scope, and
+  deterministic ordering.
 
 ## P2-4 Temporal Channel
 

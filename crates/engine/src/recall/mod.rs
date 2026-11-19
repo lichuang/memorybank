@@ -2,7 +2,9 @@
 //! lexical, graph, and temporal channels land in later tasks.
 
 pub mod bm25;
+pub mod graph;
 pub mod semantic;
 
 pub use bm25::{Bm25Config, bm25_channel};
+pub use graph::{GraphConfig, spread};
 pub use semantic::{SemanticConfig, semantic_channel};
