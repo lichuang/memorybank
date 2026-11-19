@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 3/10 · P3 0/8 · P4 1/9 · P5 0/10 (35/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 4/10 · P3 0/8 · P4 1/9 · P5 0/10 (36/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -872,11 +872,31 @@ pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)],
 
 ## P2-4 Temporal Channel
 
-**Status**: ❌
+**Status**: ✅ (2026-11-19)
 
-- **Design**: `TemporalParser.parse` → `facts_in_range(..., scope)` → proximity score `1 - |midDiff|/(range/2)`.
-- **Acceptance**: no time constraint means no activation; interval endpoint semantics fixed (closed interval).
-- **Tests**: "last week" query; no results; timezone normalization to UTC.
+- **Design**:
+```rust
+pub struct TemporalConfig { pub top_k: usize, pub min_score: f32 }  // defaults: 50 / 0.0
+pub async fn temporal_channel(store:&dyn Store, bank:BankId, query:&str,
+                              now:Timestamp, parser:&dyn TemporalParser,
+                              cfg:&TemporalConfig, scope:&FactScope)
+  -> Result<Vec<(FactId,f32)>>;
+```
+  `TemporalParser::parse` maps the query to a closed range; `None` (no recognizable
+  time expression) returns empty without touching the store. The channel calls
+  `facts_in_range(bank, range, scope)`, loads those facts, and scores each by
+  `1 - |fact_mid - query_mid| / (Δτ/2)`, clamped to `[0, 1]`; a zero-width query
+  range floors the denominator at 1 ms so scores stay finite. Facts with an
+  unknown occurrence cannot be scored and are dropped; an open interval uses its
+  start as the midpoint. Results are sorted by score desc then id, filtered by
+  `min_score` (inclusive), and truncated to `top_k`. `top_k = 0` disables the
+  channel; a reversed parser range is `Config`.
+- **Acceptance**: no time constraint means no activation; closed-interval
+  intersection semantics come from `facts_in_range`; UTC-only; scope/bank
+  isolation; deterministic ordering.
+- **Tests**: proximity ordering and scores; `min_score` + top-k; rule parser
+  ("yesterday") end-to-end; no-time query; open intervals and scope; zero-width
+  range; disabled channel; config validation.
 
 ## P2-5 RRF
 
