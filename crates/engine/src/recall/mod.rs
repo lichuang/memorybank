@@ -1,12 +1,13 @@
-//! Recall channels. P2-1 starts with the semantic (vector) channel; the
-//! lexical, graph, and temporal channels land in later tasks.
+//! Recall: the four retrieval channels plus rank fusion.
 
 pub mod bm25;
 pub mod graph;
+pub mod rrf;
 pub mod semantic;
 pub mod temporal;
 
 pub use bm25::{Bm25Config, bm25_channel};
 pub use graph::{GraphConfig, spread};
+pub use rrf::{DEFAULT_RRF_K, rrf};
 pub use semantic::{SemanticConfig, semantic_channel};
 pub use temporal::{TemporalConfig, temporal_channel};

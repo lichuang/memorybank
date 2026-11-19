@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 4/10 · P3 0/8 · P4 1/9 · P5 0/10 (36/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 5/10 · P3 0/8 · P4 1/9 · P5 0/10 (37/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -900,11 +900,27 @@ pub async fn temporal_channel(store:&dyn Store, bank:BankId, query:&str,
 
 ## P2-5 RRF
 
-**Status**: ❌
+**Status**: ✅ (2026-11-19)
 
-- **Design**: `pub fn rrf(lists:&[Vec<FactId>], k:u32)->Vec<(FactId,f32)>`; union, stable sort (score desc, id asc).
-- **Acceptance**: a single list preserves its order; a missing list contributes 0.
-- **Tests**: two crossing lists; tie-breaking stability.
+- **Design**:
+```rust
+pub const DEFAULT_RRF_K: u32 = 60;
+pub fn rrf(lists: &[Vec<FactId>], k: u32) -> Vec<(FactId, f32)>;
+```
+  Rank-based fusion (paper eq. 15): each id scores `Σ 1/(k + rank_i)` over the
+  lists it appears in, with 1-based positional ranks. A list that does not
+  contain the id contributes nothing (no penalty), so raw scores from different
+  channels never need calibration. Ranks are summed in `f32`; `k` and rank are
+  converted through `u64` so `u32::MAX` cannot overflow. Output contains the
+  union of all lists, sorted by fused score descending then id ascending. An id
+  repeated inside one list contributes once (the repeat is skipped; later
+  entries keep their positional rank).
+- **Acceptance**: a single list preserves its order; a missing list contributes
+  0; multi-list agreement outranks a single strong hit when the sums say so;
+  ordering is deterministic.
+- **Tests**: single-list order and scores; crossing lists; missing/empty list;
+  equal-score id tie-break; duplicate id inside a list; empty input and a huge
+  `k` stay finite.
 
 ## P2-6 Rerank Integration
 

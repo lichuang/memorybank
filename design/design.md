@@ -199,7 +199,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 - The graph channel starts from semantic seeds and propagates `A(fj)=max(A(fi)·w·δ·µ(kind))` over typed links plus derived entity adjacency; seeds are included, depth/visit caps bound cycles, and per-kind multipliers distinguish temporal/semantic/entity/causal edges.
 - The temporal channel activates only when the injected `TemporalParser` finds a range: it loads the intersecting facts and scores `1 - |fact_mid - query_mid|/(Δτ/2)`, so facts away from the query midpoint rank lower instead of being excluded.
 - `search_vector` / `search_bm25` run concurrently with graph expansion and temporal filtering (`try_join!`).
-- RRF: `Σ 1/(60 + rank_i)`, aggregated by fact_id.
+- RRF: `Σ 1/(k + rank_i)` with `k = 60` by default, aggregated by fact id; ranks are 1-based and positional, missing lists contribute nothing, and ties sort by id.
 - Rerank: `Reranker` scores the top-N candidates (identity stub in the first version).
 - Budget packing: greedily accumulate tokens in final order (pluggable estimator) and truncate on overflow; hit rows `access_count++`.
 
