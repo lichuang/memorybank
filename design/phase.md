@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 5/10 · P3 0/8 · P4 1/9 · P5 0/10 (37/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 6/10 · P3 0/8 · P4 1/9 · P5 0/10 (38/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -924,11 +924,24 @@ pub fn rrf(lists: &[Vec<FactId>], k: u32) -> Vec<(FactId, f32)>;
 
 ## P2-6 Rerank Integration
 
-**Status**: ❌
+**Status**: ✅ (2026-11-19)
 
-- **Design**: `pub async fn rerank_top(reranker:&dyn Reranker, query:&str, facts:&[Fact], top_n:usize)`; on error fall back to the original order and log.
-- **Acceptance**: only top-N reordered; the rest unchanged.
-- **Tests**: Identity preserves; reversing fake takes effect.
+- **Design**:
+```rust
+pub async fn rerank_top(reranker:&dyn Reranker, query:&str,
+                        facts:&[Fact], top_n:usize) -> Vec<Fact>;
+```
+  Scores only the first `top_n` facts jointly with the query and reorders that
+  prefix by score descending, ties broken by the incoming position. The tail
+  keeps the fused order; the output has the same length and facts. `top_n = 0`
+  disables reranking; `top_n` larger than the list reranks everything. A
+  reranker error or a score-count mismatch keeps the original order and logs a
+  warning, so recall never fails because the cross-encoder is unavailable.
+- **Acceptance**: only the top-N prefix is reordered; the rest is unchanged;
+  failures degrade to the fused order; the identity reranker is a no-op.
+- **Tests**: identity; reversing fake; tail untouched; error and wrong-length
+  fallbacks; zero `top_n`, single/empty lists, oversized `top_n`; equal scores
+  keep the incoming order.
 
 ## P2-7 Budget Packing
 
