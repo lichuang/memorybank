@@ -674,8 +674,38 @@ impl Store for SqliteStore {
     Ok(facts)
   }
 
-  async fn increment_access(&self, _ids: &[FactId]) -> Result<()> {
-    Err(not_implemented("increment_access"))
+  async fn increment_access(&self, ids: &[FactId]) -> Result<()> {
+    if ids.is_empty() {
+      return Ok(());
+    }
+
+    // One statement per batch: a shared parameter limit would make a single
+    // huge `IN (...)` fragile, so chunk the ids. Batches are independent and
+    // each is idempotent per call, which matches recall's best-effort counter.
+    let mut seen: HashSet<String> = HashSet::new();
+    let unique: Vec<String> = ids
+      .iter()
+      .map(|id| id.to_string())
+      .filter(|id| seen.insert(id.clone()))
+      .collect();
+
+    for chunk in unique.chunks(500) {
+      let mut query = QueryBuilder::<Sqlite>::new(
+        "UPDATE fact SET access_count = access_count + 1 WHERE id IN (",
+      );
+      let mut separated = query.separated(", ");
+      for id in chunk {
+        separated.push_bind(id);
+      }
+      query.push(")");
+      query
+        .build()
+        .execute(&self.pool)
+        .await
+        .map_err(|error| map_write("fact", error))?;
+    }
+
+    Ok(())
   }
 
   async fn ensure_entity(&self, new: NewEntity) -> Result<(EntityId, bool)> {

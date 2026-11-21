@@ -138,6 +138,9 @@ pub trait Store: Send + Sync {
   async fn fetch_facts(&self, ids: &[FactId]) -> Result<Vec<Fact>>;
 
   /// Batch-increments `access_count`; does not touch `updated_at`.
+  ///
+  /// Duplicate ids within one call count once, unknown ids are ignored, and an
+  /// empty batch is a no-op. Recall calls this best-effort after packing.
   async fn increment_access(&self, ids: &[FactId]) -> Result<()>;
 
   // —— Entity / opinion / observation / maintenance ——

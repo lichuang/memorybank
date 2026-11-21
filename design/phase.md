@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 7/10 · P3 0/8 · P4 1/9 · P5 0/10 (39/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 8/10 · P3 0/8 · P4 1/9 · P5 0/10 (40/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -970,15 +970,30 @@ pub fn pack(facts:&[(Fact,f32)], budget:usize, est:&dyn TokenEstimator)
 
 ## P2-8 Recall Products and access_count
 
-**Status**: ❌
+**Status**: ✅ (2026-11-21)
 
 - **Design**:
 ```rust
-pub struct RecalledFact { pub fact: Fact, pub score: f32, pub channels: Vec<(Channel, u32 /*rank*/)> }
+pub enum Channel { Semantic, Bm25, Graph, Temporal }   // snake_case wire names
+pub struct RecalledFact { pub fact: Fact, pub score: f32, pub channels: Vec<(Channel, u32)> }
 pub struct RecallResult { pub facts: Vec<RecalledFact>, pub tokens_used: usize }
+impl RecallResult { pub fn ids(&self)->Vec<FactId>;
+                    pub fn channels_of(&self, id:FactId)->Vec<(Channel,u32)>;
+                    pub fn is_multi_channel(&self, id:FactId)->bool; }
+pub fn sort_channels(channels:&mut Vec<(Channel,u32)>);   // canonical order + dedup
 ```
-- **Acceptance**: channels mark overlaps; `increment_access` is batched.
-- **Tests**: multi-channel hit annotation.
+  Channel evidence is ordered semantic → bm25 → graph → temporal and deduplicated,
+  so the product is deterministic and reflect can inspect multi-channel support
+  without re-running retrieval. `increment_access` is implemented as one batched
+  `UPDATE … WHERE id IN (...)` per 500 unique ids (deduplicated first): counters
+  accumulate across calls, duplicates inside a call count once, unknown ids are
+  ignored, and `updated_at` is untouched. Recall calls it best-effort after
+  packing (P2-9).
+- **Acceptance**: channel overlap is inspectable; `increment_access` is batched
+  and idempotent per call; products serialize.
+- **Tests**: channel wire names + ordering/dedup; result accessors and overlap;
+  JSON round trip; access counter increments/duplicates/unknown ids/empty batch/
+  `updated_at` untouched; 1001-id chunked batch.
 
 ## P2-9 Recall API
 
