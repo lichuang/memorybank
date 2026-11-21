@@ -3,6 +3,7 @@
 pub mod bm25;
 pub mod budget;
 pub mod graph;
+pub mod pipeline;
 pub mod products;
 pub mod rerank;
 pub mod rrf;
@@ -12,6 +13,7 @@ pub mod temporal;
 pub use bm25::{Bm25Config, bm25_channel};
 pub use budget::pack;
 pub use graph::{GraphConfig, spread};
+pub use pipeline::{ChannelMask, RecallOptions, recall};
 pub use products::{Channel, RecallResult, RecalledFact};
 pub use rerank::rerank_top;
 pub use rrf::{DEFAULT_RRF_K, rrf};

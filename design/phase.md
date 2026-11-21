@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 8/10 · P3 0/8 · P4 1/9 · P5 0/10 (40/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 9/10 · P3 0/8 · P4 1/9 · P5 0/10 (41/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -997,16 +997,42 @@ pub fn sort_channels(channels:&mut Vec<(Channel,u32)>);   // canonical order + d
 
 ## P2-9 Recall API
 
-**Status**: ❌
+**Status**: ✅ (2026-11-21)
 
 - **Design**:
 ```rust
-pub struct RecallOptions { pub token_budget: usize, pub channels: ChannelMask,
-                           pub time_range: Option<TimeRange>, pub rerank_top_n: usize, pub per_channel_k: usize }
-impl MemoryBank { pub async fn recall(&self, bank:BankId, query:&str, opts:RecallOptions) -> Result<RecallResult> }
+pub struct ChannelMask { pub semantic/bm25/graph/temporal: bool }   // ALL, NONE, only(channel)
+pub struct RecallOptions {
+  pub token_budget: usize, pub channels: ChannelMask, pub per_channel_k: usize,
+  pub rerank_top_n: usize, pub rrf_k: u32, pub scope: FactScope,
+  pub time_range: Option<TimeRange>,
+  pub semantic: SemanticConfig, pub bm25: Bm25Config,
+  pub graph: GraphConfig, pub temporal: TemporalConfig,
+}  // defaults: 2000 / ALL / 50 / 20 / 60 / All / None
+pub async fn recall(store, embedder, reranker, temporal_parser, estimator,
+                    bank, query, now, options:&RecallOptions) -> Result<RecallResult>;
+impl MemoryBank {
+  pub fn with_recall_models(&self, reranker:Arc<dyn Reranker>, parser:Arc<dyn TemporalParser>) -> Self;
+  pub fn with_token_estimator(&self, estimator:Arc<dyn TokenEstimator>) -> Self;
+  pub async fn recall(&self, bank:BankId, query:&str, options:RecallOptions) -> Result<RecallResult>;
+}
 ```
-- **Acceptance**: each of the four channels can be disabled independently; the query is embedded only once; total latency instrumented.
-- **Tests**: hit assertions for 10 questions on a fixed corpus (fake embedder semantics can be constructed).
+  `engine::recall::recall` is pure orchestration: embed the query **once**, run the
+  enabled channels (each truncated to `per_channel_k`), fuse with RRF, reload the
+  fused ids in order, optionally rerank the head, then pack into `token_budget`.
+  Defaults bind an `IdentityReranker` and `RuleTemporalParser`; `MemoryBank::recall`
+  also performs a best-effort `increment_access` on the returned facts and never
+  fails recall when the counter write fails. The graph channel is seeded from the
+  semantic list (skipped with a warning when the semantic channel is disabled or
+  empty); the temporal channel uses `options.time_range` when present, otherwise
+  the injected parser (inactive without a time expression). `ChannelMask::NONE`
+  returns an empty result without touching the store.
+- **Acceptance**: each channel can be disabled independently; the query is
+  embedded only once; RRF → rerank → pack order fixed; budget respected; scope
+  and explicit time range honored; access counters are best-effort.
+- **Tests**: multi-channel provenance; budget truncation; disabled channels and
+  `NONE`; scope isolation; explicit time range; empty bank; missing embedder is
+  `Config`; channel-mask/seed/provenance helpers.
 
 ## P2-10 Performance Baseline
 

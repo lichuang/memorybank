@@ -3,9 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::ports::{Clock, Embedder, Llm, NewChunk, SourceProgress, Store, now_ts};
+use engine::ports::{
+  Clock, Embedder, Llm, NewChunk, Reranker, SourceProgress, Store, TemporalParser, now_ts,
+};
+use engine::recall::{RecallOptions, RecallResult, recall};
 use engine::retain::{ChunkConfig, RawPayload, chunk, normalize};
-use engine::tokens::CharHeuristic;
+use engine::tokens::{CharHeuristic, TokenEstimator};
 use engine::types::{BankId, ChunkId, EntityId, Source, SourceId, SourceStatus};
 use engine::{Error, Result};
 use tokio::sync::Notify;
@@ -76,6 +79,9 @@ pub struct MemoryBank {
   pub(crate) config: RetainConfig,
   pub(crate) llm: Option<Arc<dyn Llm>>,
   pub(crate) embedder: Option<Arc<dyn Embedder>>,
+  pub(crate) reranker: Option<Arc<dyn Reranker>>,
+  pub(crate) temporal_parser: Option<Arc<dyn TemporalParser>>,
+  pub(crate) estimator: Arc<dyn TokenEstimator>,
   pub(crate) pipeline: PipelineConfig,
   pub(crate) worker: WorkerConfig,
   pub(crate) notify: Arc<Notify>,
@@ -90,6 +96,9 @@ impl MemoryBank {
       config,
       llm: None,
       embedder: None,
+      reranker: None,
+      temporal_parser: None,
+      estimator: Arc::new(CharHeuristic::default()),
       pipeline: PipelineConfig::default(),
       worker: WorkerConfig::default(),
       notify: Arc::new(Notify::new()),
@@ -100,6 +109,23 @@ impl MemoryBank {
   pub fn with_models(mut self, llm: Arc<dyn Llm>, embedder: Arc<dyn Embedder>) -> Self {
     self.llm = Some(llm);
     self.embedder = Some(embedder);
+    self
+  }
+
+  /// Adds the recall-side ports: reranker and temporal parser.
+  pub fn with_recall_models(
+    mut self,
+    reranker: Arc<dyn Reranker>,
+    temporal_parser: Arc<dyn TemporalParser>,
+  ) -> Self {
+    self.reranker = Some(reranker);
+    self.temporal_parser = Some(temporal_parser);
+    self
+  }
+
+  /// Overrides the token estimator used by recall's budget packing.
+  pub fn with_token_estimator(mut self, estimator: Arc<dyn TokenEstimator>) -> Self {
+    self.estimator = estimator;
     self
   }
 
@@ -123,6 +149,57 @@ impl MemoryBank {
   pub async fn merge_entities(&self, bank: BankId, from: EntityId, into: EntityId) -> Result<()> {
     let now = now_ts(self.clock.as_ref());
     self.store.merge_entities(bank, from, into, now).await
+  }
+
+  /// Runs the four-channel recall pipeline (see [`engine::recall::recall`]).
+  ///
+  /// The query is embedded once; the enabled channels are fused with RRF, the
+  /// head is optionally reranked, and the evidence is packed into
+  /// `options.token_budget`. Access counters are incremented best-effort for the
+  /// returned facts; a counter failure never fails recall.
+  pub async fn recall(
+    &self,
+    bank: BankId,
+    query: &str,
+    options: RecallOptions,
+  ) -> Result<RecallResult> {
+    let embedder = self
+      .embedder
+      .as_ref()
+      .ok_or_else(|| Error::config("recall requires an Embedder"))?;
+    let reranker = self
+      .reranker
+      .as_ref()
+      .ok_or_else(|| Error::config("recall requires a Reranker"))?;
+    let parser = self
+      .temporal_parser
+      .as_ref()
+      .ok_or_else(|| Error::config("recall requires a TemporalParser"))?;
+
+    let now = now_ts(self.clock.as_ref());
+    let result = recall(
+      self.store.as_ref(),
+      embedder.as_ref(),
+      reranker.as_ref(),
+      parser.as_ref(),
+      self.estimator.as_ref(),
+      bank,
+      query,
+      now,
+      &options,
+    )
+    .await?;
+
+    let ids: Vec<_> = result
+      .facts
+      .iter()
+      .map(|recalled| recalled.fact.id)
+      .collect();
+    if let Err(error) = self.store.increment_access(&ids).await {
+      tracing::warn!(%error, "could not increment recall access counters");
+    }
+
+    Ok(result)
   }
 
   /// Ingests a payload (async ack).
