@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 6/10 · P3 0/8 · P4 1/9 · P5 0/10 (38/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 7/10 · P3 0/8 · P4 1/9 · P5 0/10 (39/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -945,16 +945,28 @@ pub async fn rerank_top(reranker:&dyn Reranker, query:&str,
 
 ## P2-7 Budget Packing
 
-**Status**: ❌
+**Status**: ✅ (2026-11-20)
 
 - **Design**:
 ```rust
-pub trait TokenEstimator { fn estimate(&self, text:&str)->usize }
-pub struct CharHeuristic;      // ceil(chars * ratio), configurable
-pub fn pack(facts:&[(Fact,f32)], budget:usize, est:&dyn TokenEstimator) -> (Vec<Fact>, usize)
+pub trait TokenEstimator { fn estimate(&self, text:&str)->usize }   // P0-11
+pub struct CharHeuristic;                                         // ceil(chars * ratio)
+pub fn pack(facts:&[(Fact,f32)], budget:usize, est:&dyn TokenEstimator)
+  -> (Vec<Fact>, usize);
 ```
-- **Acceptance**: cumulative ≤ budget; stops on overflow; if the first fact alone exceeds the budget, return empty and warn (fixed behavior).
-- **Tests**: boundary cases budget=0 / exactly equal / one short.
+  Greedy in final ranked order: add facts while the cumulative estimate stays
+  within `budget`, stop at the first overflow, and return the kept facts plus
+  tokens used. Packing deliberately does not backfill with smaller lower-ranked
+  facts — order is the ranking signal, and skipping ahead would silently promote
+  worse evidence. A fact whose text alone exceeds the budget is not truncated
+  (truncating generated text would fabricate a partial quote); packing returns
+  empty and logs a warning when that happens on the first fact. `budget = 0`
+  keeps nothing. Arithmetic uses `checked_add`, so a pathological estimate cannot
+  wrap the counter.
+- **Acceptance**: cumulative ≤ budget; stops on overflow; first-fact overflow
+  returns empty (fixed behavior); order preserved.
+- **Tests**: exact fit, one short, one over; no backfilling; `budget=0`; empty
+  input; empty text (zero cost); default `CharHeuristic` ratio; overflow guard.
 
 ## P2-8 Recall Products and access_count
 

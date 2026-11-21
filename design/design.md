@@ -201,7 +201,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 - `search_vector` / `search_bm25` run concurrently with graph expansion and temporal filtering (`try_join!`).
 - RRF: `Σ 1/(k + rank_i)` with `k = 60` by default, aggregated by fact id; ranks are 1-based and positional, missing lists contribute nothing, and ties sort by id.
 - Rerank: `Reranker` jointly scores the top-N fused candidates; only that prefix is reordered (ties keep the fused order), and a reranker error or score-count mismatch falls back to the fused order with a warning.
-- Budget packing: greedily accumulate tokens in final order (pluggable estimator) and truncate on overflow; hit rows `access_count++`.
+- Budget packing: greedily accumulate tokens in final order with the injected estimator, stop at the first overflow, and never backfill with lower-ranked facts or truncate fact text; hit rows `access_count++`.
 
 ### 2.3 reflect (Answer + Opinion Formation + Reinforcement)
 
