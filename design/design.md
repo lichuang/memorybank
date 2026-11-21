@@ -240,6 +240,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 | Observability | `tracing` spans: per-chunk latency, LLM calls/retries, per-channel recall hits, budget usage |
 | IDs/Time | UUIDv7; chrono UTC |
 | Vectors | in-memory `Vec<f32>`; validate dimensions on write; adapters own the persistence form |
+| Baselines | exact `vec0` search costs ≈2.1 µs/fact on Apple Silicon (2.3 ms @1k, 21 ms @10k, k=10, 1536 dims); multi-type scopes scan once per type (P5-10 is the trigger for ANN) |
 | Concurrency | configurable chunk-worker count; claims guarantee single execution per chunk; no global lock per bank |
 
 ## 4. Testing Strategy

@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 9/10 · P3 0/8 · P4 1/9 · P5 0/10 (41/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 0/8 · P4 1/9 · P5 0/10 (42/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1036,11 +1036,28 @@ impl MemoryBank {
 
 ## P2-10 Performance Baseline
 
-**Status**: ❌
+**Status**: ✅ (2026-11-21)
 
-- **Design**: `benches/` (criterion) or example timing; record brute-force cosine latency at 1k/10k facts.
-- **Acceptance**: numbers recorded under `design/` for reference (no hard threshold).
-- **Tests**: benchmarks runnable (CI skips them).
+- **Design**: `crates/store/benches/vector_search.rs` (criterion, `harness = false`).
+  Cases: 1k and 10k embedded facts, each with `FactScope::All` (one KNN) and
+  `FactScope::Types([World, Opinion])` (one KNN per type, the path P2-1
+  exercises). Each case builds an isolated in-memory bank. Run with
+  `cargo bench -p store --bench vector_search`; CI skips benches.
+- **Recorded numbers** (Apple Silicon, release profile, `--sample-size 10`,
+  exact `vec0` scans, k=10, 1536 dims; wall time per `search_vector`):
+  | facts | scope | median |
+  |---|---|---|
+  | 1k | All | 2.26 ms |
+  | 1k | World + Opinion | 3.09 ms |
+  | 10k | All | 20.97 ms |
+  | 10k | World + Opinion | 28.37 ms |
+  Latency is linear in the scanned rows (≈2.1 µs per fact), and the multi-type
+  path costs roughly one scan per listed type. This is the expected cost of
+  exact search; the threshold for moving to an ANN index is P5-10.
+- **Acceptance**: numbers recorded for reference (no hard threshold), bench
+  runnable.
+- **Tests**: `cargo check -p store --benches` (compiles); benches are not part of
+  `cargo test`.
 
 ---
 
