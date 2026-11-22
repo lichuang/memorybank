@@ -237,7 +237,7 @@ async fn spread_decays_along_a_chain_and_terminates_cycles() {
   // A cycle must not keep increasing A (0.4 * 0.8 * 0.5 = 0.16).
   insert_link(store.pool(), bank, b, a, "semantic", None, 0.8).await;
 
-  let results = spread(&store, bank, &[(a, 1.0)], &config())
+  let results = spread(&store, bank, &[(a, 1.0)], &config(), &FactScope::All)
     .await
     .expect("spread");
   let scores: std::collections::HashMap<FactId, f32> = results.into_iter().collect();
@@ -246,7 +246,7 @@ async fn spread_decays_along_a_chain_and_terminates_cycles() {
   assert!((scores[&b] - 0.4).abs() < 1e-6);
   assert!((scores[&c] - 0.1).abs() < 1e-6);
 
-  let again = spread(&store, bank, &[(a, 1.0)], &config())
+  let again = spread(&store, bank, &[(a, 1.0)], &config(), &FactScope::All)
     .await
     .expect("spread again");
   assert_eq!(
@@ -269,7 +269,7 @@ async fn spread_honors_depth_and_visit_caps() {
     max_depth: 1,
     ..config()
   };
-  let depth_limited = spread(&store, bank, &[(a, 1.0)], &shallow)
+  let depth_limited = spread(&store, bank, &[(a, 1.0)], &shallow, &FactScope::All)
     .await
     .expect("depth");
   let ids: Vec<FactId> = depth_limited.iter().map(|(id, _)| *id).collect();
@@ -281,7 +281,7 @@ async fn spread_honors_depth_and_visit_caps() {
     max_visits: 1,
     ..config()
   };
-  let visit_limited = spread(&store, bank, &[(a, 1.0)], &one_visit)
+  let visit_limited = spread(&store, bank, &[(a, 1.0)], &one_visit, &FactScope::All)
     .await
     .expect("visits");
   let ids: Vec<FactId> = visit_limited.iter().map(|(id, _)| *id).collect();
@@ -299,7 +299,7 @@ async fn spread_uses_derived_entity_adjacency() {
   bind(store.pool(), bank, a, entity).await;
   bind(store.pool(), bank, c, entity).await;
 
-  let results = spread(&store, bank, &[(a, 1.0)], &config())
+  let results = spread(&store, bank, &[(a, 1.0)], &config(), &FactScope::All)
     .await
     .expect("entity spread");
   let scores: std::collections::HashMap<FactId, f32> = results.into_iter().collect();
@@ -312,24 +312,58 @@ async fn spread_uses_derived_entity_adjacency() {
 }
 
 #[tokio::test]
+async fn spread_stays_inside_the_scope() {
+  let (store, bank) = setup().await;
+  // opinion -> world -> opinion, so a scope-blind traversal would reach the
+  // world fact through the middle link and the entity binding.
+  let first = insert_fact(store.pool(), bank, FactType::Opinion, "first opinion").await;
+  let world = insert_fact(store.pool(), bank, FactType::World, "world evidence").await;
+  let last = insert_fact(store.pool(), bank, FactType::Opinion, "second opinion").await;
+
+  insert_link(store.pool(), bank, first, world, "semantic", None, 0.9).await;
+  insert_link(store.pool(), bank, world, last, "semantic", None, 0.9).await;
+
+  let opinion_scope = FactScope::Types(vec![FactType::Opinion]);
+  let results = spread(&store, bank, &[(first, 1.0)], &config(), &opinion_scope)
+    .await
+    .expect("spread");
+
+  let ids: Vec<FactId> = results.iter().map(|(id, _)| *id).collect();
+  assert_eq!(
+    ids,
+    vec![first],
+    "the world fact is outside the scope, so activation cannot pass through it"
+  );
+
+  let all = spread(&store, bank, &[(first, 1.0)], &config(), &FactScope::All)
+    .await
+    .expect("all scope");
+  assert_eq!(
+    all.len(),
+    3,
+    "without a scope restriction the chain is reachable"
+  );
+}
+
+#[tokio::test]
 async fn spread_ignores_empty_and_non_positive_seeds() {
   let (store, bank) = setup().await;
   let a = insert_fact(store.pool(), bank, FactType::World, "a").await;
 
   assert!(
-    spread(&store, bank, &[], &config())
+    spread(&store, bank, &[], &config(), &FactScope::All)
       .await
       .expect("empty")
       .is_empty()
   );
   assert!(
-    spread(&store, bank, &[(a, 0.0)], &config())
+    spread(&store, bank, &[(a, 0.0)], &config(), &FactScope::All)
       .await
       .expect("zero")
       .is_empty()
   );
   assert!(
-    spread(&store, bank, &[(a, f32::NAN)], &config())
+    spread(&store, bank, &[(a, f32::NAN)], &config(), &FactScope::All)
       .await
       .expect("nan")
       .is_empty()

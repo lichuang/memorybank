@@ -365,6 +365,110 @@ async fn recall_honors_scope_and_explicit_time_range() {
 }
 
 #[tokio::test]
+async fn graph_channel_does_not_leak_facts_outside_the_scope() {
+  let (sqlite, store, bank) = setup().await;
+  let query = "Emily works at Google";
+  let embedding = HashEmbedder::new(EMBEDDING_DIM)
+    .embed(&[query])
+    .await
+    .expect("embed")
+    .pop()
+    .expect("vector");
+
+  let opinion = insert_fact(
+    sqlite.pool(),
+    bank,
+    FactType::Opinion,
+    query,
+    Some(&embedding),
+    None,
+  )
+  .await;
+  let world = insert_fact(
+    sqlite.pool(),
+    bank,
+    FactType::World,
+    "Emily works at Google on search",
+    None,
+    None,
+  )
+  .await;
+
+  // The world fact is reachable from the opinion through both a semantic edge
+  // and a shared entity, so a scope-blind graph channel would return it.
+  sqlx::query(
+    "INSERT INTO fact_link (id, bank_id, from_fact_id, to_fact_id, link_type, relation, \
+     weight, created_at, updated_at) VALUES (?, ?, ?, ?, 'semantic', NULL, 0.9, 0, 0)",
+  )
+  .bind(engine::types::LinkId::new().to_string())
+  .bind(bank.to_string())
+  .bind(opinion.to_string())
+  .bind(world.to_string())
+  .execute(sqlite.pool())
+  .await
+  .expect("link");
+
+  let entity = engine::types::EntityId::new();
+  sqlx::query(
+    "INSERT INTO entity (id, bank_id, canonical_name, entity_type, mention_count, \
+     created_at, updated_at) VALUES (?, ?, 'emily', 'person', 0, 0, 0)",
+  )
+  .bind(entity.to_string())
+  .bind(bank.to_string())
+  .execute(sqlite.pool())
+  .await
+  .expect("entity");
+  for fact in [opinion, world] {
+    sqlx::query(
+      "INSERT INTO fact_entity (bank_id, fact_id, entity_id, mention_text, created_at, updated_at) \
+       VALUES (?, ?, ?, NULL, 0, 0)",
+    )
+    .bind(bank.to_string())
+    .bind(fact.to_string())
+    .bind(entity.to_string())
+    .execute(sqlite.pool())
+    .await
+    .expect("binding");
+  }
+
+  let memory = memory(store);
+  let options = RecallOptions {
+    channels: ChannelMask::only(Channel::Graph),
+    scope: FactScope::Types(vec![FactType::Opinion]),
+    rerank_top_n: 0,
+    ..RecallOptions::default()
+  };
+  let result = memory.recall(bank, query, options).await.expect("recall");
+
+  // Graph requires semantic seeds; with only the graph mask enabled there are
+  // none, so the channel is skipped and nothing is returned.
+  assert!(result.facts.is_empty(), "ids: {:?}", result.ids());
+
+  // Now run the real combination: semantic seeds + graph + opinion scope.
+  let options = RecallOptions {
+    channels: ChannelMask {
+      semantic: true,
+      bm25: false,
+      graph: true,
+      temporal: false,
+    },
+    scope: FactScope::Types(vec![FactType::Opinion]),
+    rerank_top_n: 0,
+    ..RecallOptions::default()
+  };
+  let result = memory
+    .recall(bank, query, options)
+    .await
+    .expect("recall with seeds");
+
+  assert_eq!(
+    result.ids(),
+    vec![opinion],
+    "the world fact is filtered out"
+  );
+}
+
+#[tokio::test]
 async fn recall_returns_empty_for_an_empty_bank() {
   let (_sqlite, store, bank) = setup().await;
   let memory = memory(store);

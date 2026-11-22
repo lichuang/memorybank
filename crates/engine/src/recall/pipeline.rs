@@ -188,7 +188,7 @@ pub async fn recall(
     if seeds.is_empty() {
       warn!("graph channel has no semantic seeds; skipping");
     } else {
-      let hits = spread(store, bank, &seeds, &options.graph).await?;
+      let hits = spread(store, bank, &seeds, &options.graph, &options.scope).await?;
       lists.push((Channel::Graph, take_hits(hits, options.per_channel_k)));
     }
   }

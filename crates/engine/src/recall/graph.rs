@@ -69,7 +69,11 @@ impl GraphConfig {
   }
 }
 
-/// Runs spreading activation from `seeds`.
+/// Runs spreading activation from `seeds` within `scope`.
+///
+/// `scope` bounds the graph itself: the paper's `G = (V, E)` has `V` equal to the
+/// target network, so activation never leaves the requested networks through a
+/// neighbor lookup.
 ///
 /// Non-finite and non-positive seed scores are ignored; duplicate seeds keep the
 /// highest score. The output contains every activated fact, including seeds,
@@ -80,6 +84,7 @@ pub async fn spread(
   bank: BankId,
   seeds: &[(FactId, f32)],
   cfg: &GraphConfig,
+  scope: &FactScope,
 ) -> Result<Vec<(FactId, f32)>> {
   cfg.validate()?;
 
@@ -113,7 +118,7 @@ pub async fn spread(
     }
 
     let base = activation.get(&node).copied().unwrap_or(0.0);
-    for neighbor in store.neighbors(bank, node, &FactScope::All).await? {
+    for neighbor in store.neighbors(bank, node, scope).await? {
       let mu = match neighbor.kind {
         NeighborKind::Temporal => cfg.mu_temporal,
         NeighborKind::Semantic => cfg.mu_semantic,

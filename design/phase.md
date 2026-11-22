@@ -849,7 +849,7 @@ pub struct GraphConfig {
   pub max_depth: u8, pub max_visits: usize,
 }  // defaults: delta 0.5; mu 0.5 / 0.8 / 1.2 / 1.5; depth 2; visits 1000
 pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)],
-                    cfg:&GraphConfig) -> Result<Vec<(FactId,f32)>>;
+                    cfg:&GraphConfig, scope:&FactScope) -> Result<Vec<(FactId,f32)>>;
 ```
   Activation follows `A(fj)=max(A(fi) * w * delta * mu(kind))`: seeds are the
   initial activations (non-positive/non-finite seeds ignored; duplicates keep
@@ -857,8 +857,9 @@ pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)],
   desc then fact id. `max_depth` counts edges from a seed; `max_visits` caps
   expanded nodes; a candidate only re-enqueues when it strictly improves the
   node's activation, so cycles terminate (or are bounded by the caps). `delta
-  ∈ (0,1]`; µ values are finite non-negative. The channel currently spreads over
-  `FactScope::All`.
+  ∈ (0,1]`; µ values are finite non-negative. `spread` takes the caller's
+  `FactScope` and passes it to `neighbors`, so activation cannot leave the target
+  network (paper eq. 12 keeps `V` inside the scope).
   `Store::neighbors` is now implemented: outgoing `fact_link` rows grouped by
   kind (max weight) plus derived entity adjacency (weight 1.0), filtered by bank
   and scope, in deterministic order; a fact reachable by two kinds appears once
@@ -868,7 +869,8 @@ pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)],
   is applied.
 - **Tests**: chained decay; cycle termination; depth cap; visit cap; entity-only
   adjacency; seed dedup/filtering; neighbor link/entity merge, scope, and
-  deterministic ordering.
+  deterministic ordering; a scoped chain cannot pass through an out-of-scope
+  fact; the recall pipeline's graph channel returns no out-of-scope facts.
 
 ## P2-4 Temporal Channel
 
