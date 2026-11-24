@@ -169,13 +169,22 @@ pub async fn recall(
   };
 
   let mut lists: Vec<(Channel, Vec<FactId>)> = Vec::new();
+  // Semantic hits keep their cosine scores: the graph channel seeds from them
+  // (`A(f,0) = s_sem(Q,f)`), and cosine is the only calibrated score available.
+  let mut semantic_hits: Vec<(FactId, f32)> = Vec::new();
 
   if options.channels.semantic {
     let embedding = embedding.as_ref().ok_or_else(|| {
       Error::config("the semantic channel is enabled but embedding produced no vector")
     })?;
-    let hits = semantic_channel(store, bank, embedding, &options.semantic, &options.scope).await?;
-    lists.push((Channel::Semantic, take_hits(hits, options.per_channel_k)));
+    semantic_hits = take_scored_hits(
+      semantic_channel(store, bank, embedding, &options.semantic, &options.scope).await?,
+      options.per_channel_k,
+    );
+    lists.push((
+      Channel::Semantic,
+      semantic_hits.iter().map(|(id, _)| *id).collect(),
+    ));
   }
 
   if options.channels.bm25 {
@@ -184,7 +193,9 @@ pub async fn recall(
   }
 
   if options.channels.graph {
-    let seeds = semantic_seeds(&lists);
+    // Use the semantic cosine scores as initial activation; `spread` drops
+    // non-positive seeds, so a negatively-correlated hit never starts a walk.
+    let seeds = semantic_hits.clone();
     if seeds.is_empty() {
       warn!("graph channel has no semantic seeds; skipping");
     } else {
@@ -277,6 +288,14 @@ fn empty_result() -> RecallResult {
   }
 }
 
+/// Truncates a channel's hits to `per_channel_k`, keeping the scores.
+///
+/// Only the semantic channel needs this: its cosine scores become the graph
+/// channel's initial activation.
+fn take_scored_hits(hits: Vec<(FactId, f32)>, per_channel_k: usize) -> Vec<(FactId, f32)> {
+  hits.into_iter().take(per_channel_k).collect()
+}
+
 /// Truncates a channel's hits to `per_channel_k` and keeps the ids.
 fn take_hits(hits: Vec<(FactId, f32)>, per_channel_k: usize) -> Vec<FactId> {
   hits
@@ -296,21 +315,6 @@ fn collect_ranks(lists: &[(Channel, Vec<FactId>)]) -> HashMap<FactId, Vec<(Chann
     }
   }
   ranks
-}
-
-/// Seeds for spreading activation: the semantic list, scored by reciprocal rank.
-fn semantic_seeds(lists: &[(Channel, Vec<FactId>)]) -> Vec<(FactId, f32)> {
-  lists
-    .iter()
-    .find(|(channel, _)| *channel == Channel::Semantic)
-    .map(|(_, ids)| {
-      ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, 1.0 / (index + 1) as f32))
-        .collect()
-    })
-    .unwrap_or_default()
 }
 
 /// Embeds exactly one query and validates the dimension.
@@ -369,6 +373,17 @@ mod tests {
   }
 
   #[test]
+  fn scored_hits_keep_the_cosine_scores() {
+    let ids = [FactId::new(), FactId::new(), FactId::new()];
+    let hits = vec![(ids[0], 0.98_f32), (ids[1], 0.91), (ids[2], 0.63)];
+
+    let kept = take_scored_hits(hits, 2);
+
+    assert_eq!(kept, vec![(ids[0], 0.98), (ids[1], 0.91)]);
+    assert!(take_scored_hits(Vec::new(), 5).is_empty());
+  }
+
+  #[test]
   fn take_hits_limits_and_preserves_order() {
     let ids = [FactId::new(), FactId::new(), FactId::new()];
     let hits = ids
@@ -379,21 +394,6 @@ mod tests {
     assert_eq!(take_hits(hits.clone(), 2), vec![ids[0], ids[1]]);
     assert_eq!(take_hits(hits.clone(), 0), Vec::new());
     assert_eq!(take_hits(hits, 99), ids.to_vec());
-  }
-
-  #[test]
-  fn semantic_seeds_use_reciprocal_rank() {
-    let ids = [FactId::new(), FactId::new()];
-    let lists = vec![(Channel::Semantic, ids.to_vec())];
-    let seeds = semantic_seeds(&lists);
-
-    assert_eq!(seeds.len(), 2);
-    assert_eq!(seeds[0].0, ids[0]);
-    assert!((seeds[0].1 - 1.0).abs() < 1e-6);
-    assert!((seeds[1].1 - 0.5).abs() < 1e-6);
-
-    assert!(semantic_seeds(&[]).is_empty());
-    assert!(semantic_seeds(&[(Channel::Bm25, ids.to_vec())]).is_empty());
   }
 
   #[test]

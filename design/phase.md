@@ -851,9 +851,10 @@ pub struct GraphConfig {
 pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)],
                     cfg:&GraphConfig, scope:&FactScope) -> Result<Vec<(FactId,f32)>>;
 ```
-  Activation follows `A(fj)=max(A(fi) * w * delta * mu(kind))`: seeds are the
-  initial activations (non-positive/non-finite seeds ignored; duplicates keep
-  the max), the output includes the seeds, and results are sorted by activation
+  Activation follows `A(fj)=max(A(fi) * w * delta * mu(kind))`; the caller supplies
+  the initial activations (the recall pipeline passes the semantic cosine scores
+  as `A(f,0)`), non-positive/non-finite seeds are ignored, duplicate seeds keep
+  the max, the output includes the seeds, and results are sorted by activation
   desc then fact id. `max_depth` counts edges from a seed; `max_visits` caps
   expanded nodes; a candidate only re-enqueues when it strictly improves the
   node's activation, so cycles terminate (or are bounded by the caps). `delta
@@ -1025,8 +1026,10 @@ impl MemoryBank {
   Defaults bind an `IdentityReranker` and `RuleTemporalParser`; `MemoryBank::recall`
   also performs a best-effort `increment_access` on the returned facts and never
   fails recall when the counter write fails. The graph channel is seeded from the
-  semantic list (skipped with a warning when the semantic channel is disabled or
-  empty); the temporal channel uses `options.time_range` when present, otherwise
+  semantic list's **cosine scores** (`A(f,0) = s_sem(Q,f)`, paper eq. 12; skipped
+  with a warning when the semantic channel is disabled or empty). Non-positive
+  seeds are dropped by `spread`, so a negatively-correlated hit never starts a
+  walk; the temporal channel uses `options.time_range` when present, otherwise
   the injected parser (inactive without a time expression). `ChannelMask::NONE`
   returns an empty result without touching the store.
 - **Acceptance**: each channel can be disabled independently; the query is
@@ -1034,7 +1037,8 @@ impl MemoryBank {
   and explicit time range honored; access counters are best-effort.
 - **Tests**: multi-channel provenance; budget truncation; disabled channels and
   `NONE`; scope isolation; explicit time range; empty bank; missing embedder is
-  `Config`; channel-mask/seed/provenance helpers.
+  `Config`; channel-mask/provenance helpers; semantic scores survive truncation
+  so the graph channel seeds from cosine rather than rank.
 
 ## P2-10 Performance Baseline
 
