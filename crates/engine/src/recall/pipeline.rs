@@ -146,8 +146,10 @@ impl Default for RecallOptions {
 /// §2.2), and `time_range` only has an effect when the temporal channel is
 /// enabled (a warning is logged otherwise). Fused scores are rank-based
 /// (RRF), the head may be reranked, and the result is packed into
-/// `token_budget`. No channel enabled returns an empty result without touching
-/// the store.
+/// `token_budget`. Channels run sequentially (semantic → bm25 → graph →
+/// temporal): the graph channel consumes the semantic hits, and the other two
+/// are simply awaited in turn rather than joined. No channel enabled returns an
+/// empty result without touching the store.
 ///
 /// Access counters are the caller's concern: `increment_access` is not part of
 /// this pure function.
