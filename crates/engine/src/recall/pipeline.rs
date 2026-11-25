@@ -103,7 +103,8 @@ pub struct RecallOptions {
   pub rrf_k: u32,
   /// Target networks for retrieval.
   pub scope: FactScope,
-  /// Explicit temporal constraint; bypasses the parser when set.
+  /// Explicit temporal constraint for the temporal channel; bypasses the parser
+  /// when set. It does not restrict the other channels.
   pub time_range: Option<TimeRange>,
   /// Semantic channel parameters.
   pub semantic: SemanticConfig,
@@ -139,7 +140,11 @@ impl Default for RecallOptions {
 /// `per_channel_k` candidates. The graph channel is seeded from the semantic
 /// hits, so it requires the semantic channel; the temporal channel uses
 /// `options.time_range` when set and otherwise asks the injected parser, staying
-/// inactive when the query has no time expression. Fused scores are rank-based
+/// inactive when the query has no time expression. The channels are independent:
+/// a temporal constraint does not narrow graph traversal (paper §4.2.2 restricts
+/// that traversal to `R_temp`; see the deviation note in `design/design.md`
+/// §2.2), and `time_range` only has an effect when the temporal channel is
+/// enabled (a warning is logged otherwise). Fused scores are rank-based
 /// (RRF), the head may be reranked, and the result is packed into
 /// `token_budget`. No channel enabled returns an empty result without touching
 /// the store.
@@ -160,6 +165,9 @@ pub async fn recall(
 ) -> Result<RecallResult> {
   if options.channels.is_empty() {
     return Ok(empty_result());
+  }
+  if options.time_range.is_some() && !options.channels.temporal {
+    warn!("time_range is set but the temporal channel is disabled; the constraint has no effect");
   }
 
   let embedding = if options.channels.semantic {

@@ -864,7 +864,9 @@ pub async fn spread(store:&dyn Store, bank:BankId, seeds:&[(FactId,f32)],
   `Store::neighbors` is now implemented: outgoing `fact_link` rows grouped by
   kind (max weight) plus derived entity adjacency (weight 1.0), filtered by bank
   and scope, in deterministic order; a fact reachable by two kinds appears once
-  per kind so the matching µ applies.
+  per kind so the matching µ applies. Graph expansion does **not** consult a
+  temporal constraint (paper §4.2.2 restricts traversal to `R_temp`); see the
+  known-deviation note in `design.md` §2.2.
 - **Acceptance**: depth/visit caps enforced; deterministic (same input, same
   order); cycles terminate; derived entity adjacency participates; per-kind µ
   is applied.
@@ -896,7 +898,8 @@ pub async fn temporal_channel(store:&dyn Store, bank:BankId, query:&str,
   channel; a reversed parser range is `Config`.
 - **Acceptance**: no time constraint means no activation; closed-interval
   intersection semantics come from `facts_in_range`; UTC-only; scope/bank
-  isolation; deterministic ordering.
+  isolation; deterministic ordering. This channel is independent of graph
+  traversal — it does not restrict it (see `design.md` §2.2).
 - **Tests**: proximity ordering and scores; `min_score` + top-k; rule parser
   ("yesterday") end-to-end; no-time query; open intervals and scope; zero-width
   range; disabled channel; config validation.
@@ -1034,7 +1037,9 @@ impl MemoryBank {
   returns an empty result without touching the store.
 - **Acceptance**: each channel can be disabled independently; the query is
   embedded only once; RRF → rerank → pack order fixed; budget respected; scope
-  and explicit time range honored; access counters are best-effort.
+  and explicit time range honored (a `time_range` with the temporal channel
+  disabled logs a warning because it has no effect); access counters are
+  best-effort.
 - **Tests**: multi-channel provenance; budget truncation; disabled channels and
   `NONE`; scope isolation; explicit time range; empty bank; missing embedder is
   `Config`; channel-mask/provenance helpers; semantic scores survive truncation

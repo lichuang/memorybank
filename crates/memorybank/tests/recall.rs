@@ -469,6 +469,36 @@ async fn graph_channel_does_not_leak_facts_outside_the_scope() {
 }
 
 #[tokio::test]
+async fn time_range_without_the_temporal_channel_is_reported() {
+  let (sqlite, store, bank) = setup().await;
+  insert_fact(
+    sqlite.pool(),
+    bank,
+    FactType::World,
+    "Emily joined the team",
+    None,
+    Some(hour(3)),
+  )
+  .await;
+
+  let memory = memory(store);
+  let options = RecallOptions {
+    channels: ChannelMask::only(Channel::Bm25),
+    time_range: Some(engine::types::TimeRange {
+      start: ts(0),
+      end: ts(hour(1)),
+    }),
+    rerank_top_n: 0,
+    ..RecallOptions::default()
+  };
+
+  // The call still succeeds: the constraint is documented as temporal-only, so
+  // it cannot fail the query. It must stay visible through the warning instead.
+  let result = memory.recall(bank, "Emily", options).await.expect("recall");
+  assert_eq!(result.facts.len(), 1, "the BM25 channel still answers");
+}
+
+#[tokio::test]
 async fn recall_returns_empty_for_an_empty_bank() {
   let (_sqlite, store, bank) = setup().await;
   let memory = memory(store);
