@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 0/8 · P4 1/9 · P5 0/10 (42/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 1/8 · P4 1/9 · P5 0/10 (43/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1076,11 +1076,26 @@ impl MemoryBank {
 
 ## P3-1 φ(Θ) Verbalization
 
-**Status**: ❌
+**Status**: ✅ (2026-11-25)
 
-- **Design**: `pub fn verbalize(p:&BankProfile)->String`; 5 levels each for S/L/E + β modulation in three bands (0/0.5/1 rules).
-- **Acceptance**: stable output for the same profile; β=0 softens preference wording.
-- **Tests**: snapshot for extreme combinations.
+- **Design**:
+```rust
+pub fn verbalize(profile: &BankProfile) -> String;
+```
+  One sentence: three disposition clauses in the order skepticism → literalism →
+  empathy, followed by a bias-strength clause. Each level has its own wording
+  anchored on the paper's extremes (1 = trusting / flexible / detached, 5 =
+  skeptical / literal / empathetic). Bias uses three bands at 0.25 / 0.75, which
+  reproduce the paper's 0 / 0.5 / 1 anchors: fact-based, balanced, strongly
+  preference-conditioned. Out-of-range levels are clamped and a non-finite β falls
+  back to the fact-based clause, so a malformed profile still yields usable text;
+  `BankProfile::validate` remains the write-time gate. Output depends only on the
+  profile, so prompts are stable and snapshot-testable.
+- **Acceptance**: byte-identical output for the same profile; every level has
+  distinct wording; β bands change only the modulation clause; β=0 softens
+  preference wording.
+- **Tests**: paper-example shape; all 18 wordings distinct; stability; bias bands
+  and boundaries; clamping; non-finite β; extreme profiles read as one sentence.
 
 ## P3-2 System Message Assembly
 
