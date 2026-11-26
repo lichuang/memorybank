@@ -1,8 +1,10 @@
 //! Reflect: preference-conditioned reasoning (paper §5).
 //!
-//! Starts with the verbalization of the numeric behavioral profile; the system
-//! message, LLM call, and opinion persistence build on it.
+//! The verbalization of the numeric behavioral profile feeds the system message;
+//! the LLM call and opinion persistence build on that.
 
+pub mod system_message;
 pub mod verbalize;
 
+pub use system_message::{SystemMessageConfig, system_message};
 pub use verbalize::verbalize;

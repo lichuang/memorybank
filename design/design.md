@@ -210,7 +210,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 ### 2.3 reflect (Answer + Opinion Formation + Reinforcement)
 
 - `verbalize(profile)` renders Θ as one stable sentence: skepticism → literalism → empathy clauses plus a bias band (β < 0.25 fact-based, < 0.75 balanced, otherwise strongly preference-conditioned). It depends only on the profile, so prompts stay byte-stable.
-- recall evidence → assemble the system message (name n, background h, verbalized φ(Θ) + β-dependent wording modulation).
+- recall evidence → assemble the system message: name `n`, background `h`, `verbalize(Θ)` verbatim, and a numbered `[n] <fact text>` evidence block. Caps on evidence count/characters drop whole items from the tail and report the omission rather than truncating a fact; empty evidence is stated explicitly.
 - One `Llm::complete_json_raw` call produces { answer text, candidate opinions[] } (A.2: first person, confidence, reasoning).
 - New opinions go through `insert_opinion`; existing opinions are reinforced (Assess → c±α; strong contradictions may rewrite text).
 

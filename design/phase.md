@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 1/8 · P4 1/9 · P5 0/10 (43/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 2/8 · P4 1/9 · P5 0/10 (44/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1099,11 +1099,27 @@ pub fn verbalize(profile: &BankProfile) -> String;
 
 ## P3-2 System Message Assembly
 
-**Status**: ❌
+**Status**: ✅ (2026-11-26)
 
-- **Design**: `pub fn system_message(bank:&Bank, evidence:&[RecalledFact])->String` (name/background/φ/numbered evidence block).
-- **Acceptance**: evidence is referenceable by number; with no evidence, explicitly states "no relevant memories".
-- **Tests**: snapshot; oversized-evidence truncation policy.
+- **Design**:
+```rust
+pub struct SystemMessageConfig { pub max_evidence: usize, pub max_chars: usize }  // 24 / 6000
+pub fn system_message(bank:&Bank, evidence:&[RecalledFact], cfg:&SystemMessageConfig) -> String;
+```
+  Layout: bank name → background (explicit `(no background provided)` when empty) →
+  `verbalize(&bank.profile)` verbatim → a citation instruction → `[n] <fact.text>`
+  lines → a final "say so instead of guessing" guard. Evidence is numbered 1-based
+  and kept in recall order. Caps are applied **whole-item**: the block stops at the
+  first item that would exceed `max_chars` rather than truncating its text or
+  promoting a smaller lower-ranked item (the same policy budget packing follows),
+  and reports how many were omitted. With no evidence the block says no relevant
+  memories were found. Output depends only on the inputs, so prompts are stable.
+- **Acceptance**: evidence is referenceable by number; no evidence is stated
+  explicitly; caps never produce a partial quote; omissions are reported.
+- **Tests**: name/background/φ present; numbering and order; empty evidence;
+  `max_evidence` cap with omission count (singular/plural); char cap stops at the
+  first overflow without backfilling; empty background placeholder; stability and
+  trailing guard; bias changes only the profile sentence.
 
 ## P3-3 Answer + Opinion Extraction
 
