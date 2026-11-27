@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 5/8 · P4 1/9 · P5 0/10 (47/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 6/8 · P4 1/9 · P5 0/10 (48/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1216,11 +1216,20 @@ impl ReflectResult {
 
 ## P3-7 Behavior Tests
 
-**Status**: ❌
+**Status**: ✅ (2026-11-27)
 
-- **Design**: FakeLlm records requests; assert system-prompt differences between high/low-skepticism profiles and β modulation.
-- **Acceptance**: prompt assertions stable (snapshots).
-- **Tests**: compare two profiles.
+- **Design**: `crates/engine/tests/reflect_behavior.rs` drives the real two-step
+  path (`system_message → reflect_llm`) against `FakeLlm` and asserts on the
+  request that was actually sent, not on the verbalization helper in isolation.
+- **Acceptance**: profile differences are observable in the recorded system
+  prompt; the evidence block and the question are unaffected by bias; the request
+  uses `schema_name = "reflect"`, the configured temperature, and the embedded
+  prompt; verbalization is stable across calls.
+- **Tests**: high vs low skepticism produce different prompts (each containing its
+  own verbalization); literalism/empathy wording appears; β changes only the
+  modulation clause while evidence and user prompt stay identical; evidence
+  numbering matches recall order and `RecallResult::ids`; repeated verbalization is
+  byte-stable; the recorded request carries the expected schema and prompt.
 
 ## P3-8 reflect API
 
