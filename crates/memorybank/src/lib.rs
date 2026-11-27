@@ -6,11 +6,13 @@
 //!
 //! Implementation starts at phase P0 in `design/phase.md`.
 
+mod reflect;
 mod retain;
 mod worker;
 
 pub use engine;
 pub use llm;
+pub use reflect::ReflectOptions;
 pub use retain::{MemoryBank, RetainConfig, RetainState, RetainStatus};
 pub use store;
 pub use worker::{PipelineConfig, RescanReport, WorkerConfig};

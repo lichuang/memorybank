@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 6/8 · P4 1/9 · P5 0/10 (48/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 7/8 · P4 1/9 · P5 0/10 (49/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1233,11 +1233,33 @@ impl ReflectResult {
 
 ## P3-8 reflect API
 
-**Status**: ❌
+**Status**: ✅ (2026-11-27)
 
-- **Design**: `impl MemoryBank { pub async fn reflect(&self, bank, query, opts:ReflectOptions)->Result<ReflectResult> }` (internally recall + LLM + persistence).
-- **Acceptance**: end-to-end runs; failures retryable (pre-generated opinion ids + single-transaction insert prevent duplicates).
-- **Tests**: integration (fake).
+- **Design**:
+```rust
+pub struct ReflectOptions {
+  pub recall: RecallOptions, pub message: SystemMessageConfig,
+  pub llm: ReflectConfig, pub persist_opinions: bool,   // default true
+}
+impl MemoryBank {
+  pub async fn reflect(&self, bank:BankId, query:&str, opts:ReflectOptions) -> Result<ReflectResult>;
+  pub async fn reflect_default(&self, bank:BankId, query:&str) -> Result<ReflectResult>;
+}
+```
+  Flow: recall the query → `load_bank` → `system_message` → one `reflect_llm`
+  call → `prepare_opinion` + `insert_opinion` per draft. An empty query is rejected
+  before any model call. Each opinion id is allocated before its insert, so a
+  transport failure writes nothing and a retry starts clean; each opinion commits
+  in its own transaction, so a partial batch leaves the successful rows and returns
+  the error. `persist_opinions = false` supports read-only reflection. Recall's
+  best-effort `access_count` behaviour is inherited unchanged. Reinforcement is
+  **not** wired here: P3-5 remains on hold, so this path only creates rows.
+- **Acceptance**: end-to-end runs with fakes; no opinion rows on a failed model
+  call; evidence and profile visible in the prompt; persistence can be disabled.
+- **Tests**: answer + evidence id + persisted opinion (chunk_id NULL, confidence,
+  embedding); empty opinion list; persistence disabled; missing LLM is `Config`;
+  empty query makes no call; failed call writes nothing; access counters recorded;
+  system prompt carries name/verbalized profile/numbered evidence.
 
 ---
 
