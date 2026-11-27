@@ -5,10 +5,12 @@
 
 pub mod llm;
 pub mod opinion;
+pub mod result;
 pub mod system_message;
 pub mod verbalize;
 
 pub use llm::{ReflectConfig, reflect_llm};
 pub use opinion::{bind_known_entities, build_opinion, prepare_opinion};
+pub use result::ReflectResult;
 pub use system_message::{SystemMessageConfig, system_message};
 pub use verbalize::verbalize;

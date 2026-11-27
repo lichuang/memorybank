@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 4/8 · P4 1/9 · P5 0/10 (46/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 5/8 · P4 1/9 · P5 0/10 (47/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1186,11 +1186,33 @@ async fn insert_opinion(&self, opinion:NewOpinion) -> Result<()>;  // now implem
 
 ## P3-6 Evidence Passthrough
 
-**Status**: ❌
+**Status**: ✅ (2026-11-27)
 
-- **Design**: `ReflectResult { answer, opinions_formed: Vec<FactId>, recalled: RecallResult }`.
-- **Acceptance**: the answer↔evidence id relationship is externally inspectable (no text parsing).
-- **Tests**: return-structure assertions.
+- **Design**:
+```rust
+pub struct ReflectResult {
+  pub answer: String,
+  pub opinions_formed: Vec<FactId>,
+  pub recalled: RecallResult,
+}
+impl ReflectResult {
+  pub fn evidence_ids(&self) -> Vec<FactId>;
+  pub fn evidence_id(&self, number: usize) -> Option<FactId>;   // 1-based, matches "[n]"
+  pub fn evidence_number(&self, id: FactId) -> Option<usize>;
+  pub fn formed_any_opinion(&self) -> bool;
+  pub fn has_evidence(&self) -> bool;
+}
+```
+  The answer↔evidence link is structural, not textual: evidence is numbered in
+  the same order as the system message, so a `[n]` citation resolves through
+  `evidence_id(n)` without parsing the answer. `opinions_formed` carries the ids of
+  the rows actually written this call, in draft order. The struct is serializable,
+  so a caller can persist or forward the whole product.
+- **Acceptance**: the answer↔evidence relationship is inspectable through ids;
+  empty evidence is reported explicitly; formed opinions are addressable.
+- **Tests**: citation number ↔ id mapping (including out-of-range), round trip
+  between number and id, empty evidence, formed-opinion ids, answer verbatim, JSON
+  round trip.
 
 ## P3-7 Behavior Tests
 
