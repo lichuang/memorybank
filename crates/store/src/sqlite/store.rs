@@ -942,8 +942,29 @@ impl Store for SqliteStore {
     Ok(candidates)
   }
 
-  async fn insert_opinion(&self, _opinion: NewOpinion) -> Result<()> {
-    Err(not_implemented("insert_opinion"))
+  async fn insert_opinion(&self, opinion: NewOpinion) -> Result<()> {
+    if !opinion.confidence.is_finite() || !(0.0..=1.0).contains(&opinion.confidence) {
+      return Err(Error::config(
+        "insert_opinion: confidence must be finite and in [0, 1]",
+      ));
+    }
+
+    let mut tx = self
+      .pool
+      .begin()
+      .await
+      .map_err(|error| map_write("opinion", error))?;
+
+    match insert_opinion_tx(&mut tx, &opinion).await {
+      Ok(()) => tx
+        .commit()
+        .await
+        .map_err(|error| map_write("opinion", error)),
+      Err(error) => {
+        let _ = tx.rollback().await;
+        Err(error)
+      }
+    }
   }
 
   async fn insert_observations(&self, _observations: Vec<NewObservation>) -> Result<()> {
@@ -1138,6 +1159,69 @@ impl Store for SqliteStore {
   ) -> Result<usize> {
     Err(not_implemented("gc_observations"))
   }
+}
+
+/// Executes one opinion insert inside the caller's transaction.
+///
+/// The opinion row has `chunk_id = NULL` by construction: reflect-formed opinions
+/// are not derived from a single chunk. Bindings are deduplicated by entity id so
+/// a repeated mention cannot violate `PRIMARY KEY (fact_id, entity_id)`.
+async fn insert_opinion_tx(tx: &mut Transaction<'_, Sqlite>, opinion: &NewOpinion) -> Result<()> {
+  sqlx::query(
+    "INSERT INTO fact (id, bank_id, fact_type, text, chunk_id, occurred_start, occurred_end, \
+     mentioned_at, confidence, access_count, attrs, created_at, updated_at) \
+     VALUES (?, ?, 'opinion', ?, NULL, NULL, NULL, NULL, ?, 0, NULL, ?, ?)",
+  )
+  .bind(opinion.id.to_string())
+  .bind(opinion.bank_id.to_string())
+  .bind(&opinion.text)
+  .bind(opinion.confidence)
+  .bind(to_epoch_millis(opinion.created_at))
+  .bind(to_epoch_millis(opinion.created_at))
+  .execute(&mut **tx)
+  .await
+  .map_err(|error| map_write("fact", error))?;
+
+  if let Some(embedding) = &opinion.embedding {
+    sqlx::query(
+      "INSERT INTO fact_vec(rowid, fact_id, bank_id, fact_type, embedding) \
+       SELECT rowid, id, bank_id, fact_type, ? FROM fact WHERE id = ?",
+    )
+    .bind(encode_embedding(embedding))
+    .bind(opinion.id.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("fact_vec", error))?;
+  }
+
+  sqlx::query("INSERT INTO fact_fts (fact_id, text) VALUES (?, ?)")
+    .bind(opinion.id.to_string())
+    .bind(&opinion.text)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("fact_fts", error))?;
+
+  let mut seen: HashSet<String> = HashSet::new();
+  for (entity_id, mention) in &opinion.entities {
+    if !seen.insert(entity_id.to_string()) {
+      continue;
+    }
+    sqlx::query(
+      "INSERT INTO fact_entity (bank_id, fact_id, entity_id, mention_text, created_at, updated_at) \
+       VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(opinion.bank_id.to_string())
+    .bind(opinion.id.to_string())
+    .bind(entity_id.to_string())
+    .bind(mention)
+    .bind(to_epoch_millis(opinion.created_at))
+    .bind(to_epoch_millis(opinion.created_at))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| map_write("fact_entity", error))?;
+  }
+
+  Ok(())
 }
 
 /// Loads one entity row inside a maintenance transaction.

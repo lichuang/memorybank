@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 3/8 · P4 1/9 · P5 0/10 (45/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 4/8 · P4 1/9 · P5 0/10 (46/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1149,11 +1149,32 @@ pub async fn reflect_llm(llm:&dyn Llm, system:String, query:&str,
 
 ## P3-4 Opinion Persistence
 
-**Status**: ❌
+**Status**: ✅ (2026-11-27)
 
-- **Design**: `NewOpinion { id, bank_id, text, confidence, entities: Vec<(EntityId, Option<String>)>, embedding, created_at }`; entity binding via `bind_known_entities(store, bank, text)` (exact/substring matching against canonical names/variants, no LLM calls).
-- **Acceptance**: chunk_id=None; confidence required; embedding written.
-- **Tests**: 0/2 entities bound; text containing multiple known entities.
+- **Design**:
+```rust
+pub async fn bind_known_entities(store:&dyn Store, bank:BankId, text:&str)
+  -> Result<Vec<(EntityId, Option<String>)>>;
+pub fn build_opinion(id:FactId, bank:BankId, text:&str, confidence:f32,
+                     entities:Vec<(EntityId,Option<String>)>, embedding:Option<Vec<f32>>,
+                     created_at:Timestamp) -> Result<NewOpinion>;
+pub async fn prepare_opinion(...) -> Result<NewOpinion>;  // bind + build
+async fn insert_opinion(&self, opinion:NewOpinion) -> Result<()>;  // now implemented
+```
+  Entity binding is a case-insensitive substring match over each candidate's
+  canonical name and recorded `mention_text` variants, longest surface form first;
+  overlapping spans resolve to the longest form, each entity binds once, and no
+  entity is ever created. `insert_opinion` validates `confidence ∈ [0,1]` before
+  opening the transaction, then writes the opinion row (`chunk_id = NULL`), its
+  optional `fact_vec` row, its `fact_fts` row, and deduplicated `fact_entity`
+  bindings in one transaction. `prepared_opinion` allocates the id up front so a
+  retry cannot duplicate the row.
+- **Acceptance**: `chunk_id IS NULL`; confidence required and validated; embedding
+  written when present; bindings deduplicated; nothing written on validation
+  failure.
+- **Tests**: 0/2 entities bound; variant + case-insensitive match; longest-surface
+  preference; duplicate mentions collapse; full row/vector/FTS/binding write;
+  out-of-range confidence rejected with no rows.
 
 ## P3-5 Reinforcement Reuse
 

@@ -4,9 +4,11 @@
 //! the LLM call and opinion persistence build on that.
 
 pub mod llm;
+pub mod opinion;
 pub mod system_message;
 pub mod verbalize;
 
 pub use llm::{ReflectConfig, reflect_llm};
+pub use opinion::{bind_known_entities, build_opinion, prepare_opinion};
 pub use system_message::{SystemMessageConfig, system_message};
 pub use verbalize::verbalize;
