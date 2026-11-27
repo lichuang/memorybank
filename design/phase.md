@@ -3,7 +3,7 @@
 Based on `design.md` (implementation design) and `memory-schema.md` (finalized logical schema).
 
 > **Status convention**: each task's `**Status**` line defaults to ❌; when complete, change it to ✅ (a date or commit hash is recommended).
-> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 2/8 · P4 1/9 · P5 0/10 (44/69 total)**
+> Current progress: **P0 12/12 · P1 19/20 · P2 10/10 · P3 3/8 · P4 1/9 · P5 0/10 (45/69 total)**
 
 > **Scope note (storage)**: only SQLite is implemented. The PostgreSQL adapter and the dual-backend contract tests (P5-1/P5-2) are **deferred** until a second backend is actually needed; no `postgres` feature, module, or migration exists today. The `Store` contract remains backend-neutral.
 
@@ -1123,11 +1123,29 @@ pub fn system_message(bank:&Bank, evidence:&[RecalledFact], cfg:&SystemMessageCo
 
 ## P3-3 Answer + Opinion Extraction
 
-**Status**: ❌
+**Status**: ✅ (2026-11-26)
 
-- **Design**: `pub async fn reflect_llm(llm:&dyn Llm, sys:String, user:String)->Result<ReflectResponse>` (schema `reflect`).
-- **Acceptance**: opinion confidence ∈[0,1]; empty opinions are valid.
-- **Tests**: FakeLlm returns two opinions.
+- **Design**:
+```rust
+pub struct ReflectConfig { pub temperature: f32, pub max_tokens: u32,
+                           pub default_opinion_confidence: f32 }  // 0.3 / 1500 / 0.5
+pub async fn reflect_llm(llm:&dyn Llm, system:String, query:&str,
+                         cfg:&ReflectConfig) -> Result<ReflectResponse>;
+```
+  One structured call with `schema_name = "reflect"`: the assembled system message
+  from P3-2 plus a fixed user prompt (`prompts/reflect.md`) carrying the question,
+  grounding/citation rules, the first-person opinion rules from A.2, and the JSON
+  output contract. Validation: an empty `answer` is `Fatal` (contract violation);
+  an empty `opinions` list is valid. Drafts are normalized in place — confidence is
+  clamped to `[0, 1]`, a non-finite value falls back to
+  `default_opinion_confidence` (itself clamped), and drafts with blank text are
+  dropped with a warning. Persistence is out of scope; P3-4 writes the rows.
+- **Acceptance**: opinion confidence ∈ [0,1]; empty opinions are valid; a missing
+  `opinions` key or empty answer fails as `Fatal`.
+- **Tests**: two opinions returned with the request shape asserted; empty opinion
+  list; confidence clamping (above/below range) and non-finite fallback; blank
+  opinion dropped; empty answer rejected; exhausted fake is `Fatal`; missing
+  `opinions` key rejected; fallback normalization bounds.
 
 ## P3-4 Opinion Persistence
 
