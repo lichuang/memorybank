@@ -1163,6 +1163,11 @@ pub fn build_opinion(id:FactId, bank:BankId, text:&str, confidence:f32,
 pub async fn prepare_opinion(...) -> Result<NewOpinion>;  // bind + build
 async fn insert_opinion(&self, opinion:NewOpinion) -> Result<()>;  // now implemented
 ```
+  `OpinionDraft.reasoning` is preserved as `fact.attrs = {"reasoning": …}` and is
+  never spliced into `text`: A.2 asks for reasoning woven naturally into the
+  statement, so machine concatenation would damage the model's phrasing, while
+  `attrs` keeps it auditable without entering the retrieval corpus or the
+  embedding. Rows without reasoning keep `attrs = NULL`.
   Entity binding is a case-insensitive substring match over each candidate's
   canonical name and recorded `mention_text` variants, longest surface form first;
   overlapping spans resolve to the longest form, each entity binds once, and no
@@ -1172,10 +1177,10 @@ async fn insert_opinion(&self, opinion:NewOpinion) -> Result<()>;  // now implem
   bindings in one transaction. `prepared_opinion` allocates the id up front so a
   retry cannot duplicate the row.
 - **Acceptance**: `chunk_id IS NULL`; confidence required and validated; embedding
-  written when present; bindings deduplicated; nothing written on validation
-  failure.
+  written when present; bindings deduplicated; reasoning preserved in `attrs`;
+  nothing written on validation failure.
 - **Tests**: 0/2 entities bound; variant + case-insensitive match; longest-surface
-  preference; duplicate mentions collapse; full row/vector/FTS/binding write;
+  preference; duplicate mentions collapse; full row/vector/FTS/binding/attrs write;
   out-of-range confidence rejected with no rows.
 
 ## P3-5 Reinforcement Reuse

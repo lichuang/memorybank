@@ -137,6 +137,7 @@ async fn persists_the_opinion_with_its_bindings_and_embedding() {
     "I believe Alice is reliable",
     0.7,
     Some(embedding()),
+    Some("she has a strong delivery record"),
     ts(9_000),
   )
   .await
@@ -160,6 +161,15 @@ async fn persists_the_opinion_with_its_bindings_and_embedding() {
     .await
     .expect("vector");
   assert_eq!(vectors, 1);
+
+  let attrs: Option<String> = sqlx::query_scalar("SELECT attrs FROM fact WHERE id = ?")
+    .bind(id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("attrs");
+  let attrs: serde_json::Value =
+    serde_json::from_str(&attrs.expect("reasoning is preserved")).expect("attrs json");
+  assert_eq!(attrs["reasoning"], "she has a strong delivery record");
 
   let fts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fact_fts WHERE fact_id = ?")
     .bind(id.to_string())
@@ -196,6 +206,7 @@ async fn duplicate_bindings_collapse_to_one_row() {
     "I trust Alice because Alice delivers",
     0.6,
     None,
+    None,
     ts(1),
   )
   .await
@@ -229,6 +240,7 @@ async fn rejects_an_out_of_range_confidence() {
     confidence: 1.5,
     entities: Vec::new(),
     embedding: None,
+    attrs: None,
     created_at: ts(0),
   };
 

@@ -126,6 +126,7 @@ impl MemoryBank {
         &draft.opinion,
         draft.confidence,
         embedding,
+        Some(&draft.reasoning),
         now,
       )
       .await?;

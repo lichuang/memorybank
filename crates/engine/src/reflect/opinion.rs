@@ -90,10 +90,15 @@ pub async fn bind_known_entities(
 /// Builds the opinion row for persistence.
 ///
 /// The text is stored verbatim — opinions are not events, so no time prefix is
-/// added. The id is pre-allocated so a retry cannot duplicate the row, and
-/// `chunk_id` stays `None` (the store inserts reflect-formed opinions without a
-/// chunk). Confidence is clamped defensively; callers should already have
-/// normalized it.
+/// added, and the model's `reasoning` is **not** spliced into it: A.2 asks for
+/// reasoning woven naturally into the statement, so machine concatenation would
+/// damage the model's own wording. The `reasoning` is preserved in
+/// `attrs.reasoning` instead, where it stays auditable without entering the
+/// retrieval corpus.
+///
+/// The id is pre-allocated so a retry cannot duplicate the row, and `chunk_id`
+/// stays `None` (the store inserts reflect-formed opinions without a chunk).
+/// Confidence is clamped defensively; callers should already have normalized it.
 #[allow(clippy::too_many_arguments)]
 pub fn build_opinion(
   id: FactId,
@@ -102,6 +107,7 @@ pub fn build_opinion(
   confidence: f32,
   entities: Vec<(EntityId, Option<String>)>,
   embedding: Option<Vec<f32>>,
+  reasoning: Option<&str>,
   created_at: Timestamp,
 ) -> Result<NewOpinion> {
   if text.trim().is_empty() {
@@ -118,8 +124,22 @@ pub fn build_opinion(
     confidence: confidence.clamp(0.0, 1.0),
     entities,
     embedding,
+    attrs: opinion_attrs(reasoning),
     created_at,
   })
+}
+
+/// Wraps the model's reasoning as audit metadata.
+///
+/// Returns `None` when there is nothing to record, so rows without reasoning keep
+/// a `NULL` attrs column instead of an empty object.
+fn opinion_attrs(reasoning: Option<&str>) -> Option<serde_json::Value> {
+  match reasoning {
+    Some(reasoning) if !reasoning.trim().is_empty() => {
+      Some(serde_json::json!({ "reasoning": reasoning.trim() }))
+    }
+    _ => None,
+  }
 }
 
 /// Binds known entities and returns the row, ready for [`Store::insert_opinion`].
@@ -131,10 +151,13 @@ pub async fn prepare_opinion(
   text: &str,
   confidence: f32,
   embedding: Option<Vec<f32>>,
+  reasoning: Option<&str>,
   created_at: Timestamp,
 ) -> Result<NewOpinion> {
   let entities = bind_known_entities(store, bank, text).await?;
-  build_opinion(id, bank, text, confidence, entities, embedding, created_at)
+  build_opinion(
+    id, bank, text, confidence, entities, embedding, reasoning, created_at,
+  )
 }
 
 #[cfg(test)]
@@ -148,7 +171,7 @@ mod tests {
     let id = FactId::new();
 
     assert!(matches!(
-      build_opinion(id, bank, "   ", 0.5, Vec::new(), None, timestamp(0)),
+      build_opinion(id, bank, "   ", 0.5, Vec::new(), None, None, timestamp(0)),
       Err(Error::Config(_))
     ));
     assert!(matches!(
@@ -158,6 +181,7 @@ mod tests {
         "I think A",
         f32::NAN,
         Vec::new(),
+        None,
         None,
         timestamp(0)
       ),
@@ -173,6 +197,7 @@ mod tests {
       "I think A",
       1.7,
       Vec::new(),
+      None,
       None,
       timestamp(0),
     )
@@ -193,6 +218,7 @@ mod tests {
       0.4,
       vec![(entity, Some("alice".into()))],
       Some(vec![0.1, 0.2]),
+      Some("she delivered on time"),
       timestamp(5),
     )
     .expect("opinion");
@@ -201,5 +227,9 @@ mod tests {
     assert_eq!(opinion.entities, vec![(entity, Some("alice".into()))]);
     assert_eq!(opinion.embedding, Some(vec![0.1, 0.2]));
     assert_eq!(opinion.created_at, timestamp(5));
+    assert_eq!(
+      opinion.attrs,
+      Some(serde_json::json!({ "reasoning": "she delivered on time" }))
+    );
   }
 }

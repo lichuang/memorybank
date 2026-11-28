@@ -426,6 +426,9 @@ pub struct NewOpinion {
   pub entities: Vec<(EntityId, Option<String>)>,
   /// Embedding vector; `None` means backfill is pending.
   pub embedding: Option<Vec<f32>>,
+  /// Auxiliary audit metadata (e.g. the model's `reasoning`); never part of the
+  /// retrieval text.
+  pub attrs: Option<serde_json::Value>,
   /// Creation time.
   pub created_at: Timestamp,
 }

@@ -1170,12 +1170,13 @@ async fn insert_opinion_tx(tx: &mut Transaction<'_, Sqlite>, opinion: &NewOpinio
   sqlx::query(
     "INSERT INTO fact (id, bank_id, fact_type, text, chunk_id, occurred_start, occurred_end, \
      mentioned_at, confidence, access_count, attrs, created_at, updated_at) \
-     VALUES (?, ?, 'opinion', ?, NULL, NULL, NULL, NULL, ?, 0, NULL, ?, ?)",
+     VALUES (?, ?, 'opinion', ?, NULL, NULL, NULL, NULL, ?, 0, ?, ?, ?)",
   )
   .bind(opinion.id.to_string())
   .bind(opinion.bank_id.to_string())
   .bind(&opinion.text)
   .bind(opinion.confidence)
+  .bind(opinion.attrs.as_ref().map(serde_json::Value::to_string))
   .bind(to_epoch_millis(opinion.created_at))
   .bind(to_epoch_millis(opinion.created_at))
   .execute(&mut **tx)
