@@ -180,7 +180,7 @@ ingest(payload):
 worker loop (required for processing, one-shot `rescan` in tests):
   claim_chunk (pending→extracting; updated_at = claim token)
              → extract (Llm, A.1/A.5.1) → resolve (Store) → embed (Embedder)
-             → build links (link module) → reinforce (Assess + confidence deltas)
+             → build links (link module) → reinforce (Assess + confidence deltas)  [P3-5, pending]
              → merge background (MergeLLM, outside tx) → commit_chunk (tx2, guarded by the claim token)
   // on failure: release_chunk, back to pending (or failed per retry policy)
 rescan(): received sources → re-chunk; pending / stale-extracting chunks → re-run extraction
@@ -217,7 +217,7 @@ status: aggregate chunk state per source id (no progress table, no new column)
 - `MemoryBank::reflect` runs recall → `system_message` → `reflect_llm` → persist; ids are allocated before insert so a failed call writes nothing, and `persist_opinions = false` allows read-only reflection with no `Embedder` wired. The facade exposes per-port builders (`with_llm`, `with_reranker`, `with_temporal_parser`) so a caller is not forced to wire ports it never uses. Ports are validated where they are used, not at the entry point: the semantic channel requires an `Embedder`, reranking requires a `Reranker`, and the temporal channel requires a `TemporalParser` only when no explicit `time_range` is supplied.
 - `ReflectResult { answer, opinions_formed, recalled }` makes the evidence structural: the system message numbers memories, and `evidence_id(n)` resolves a `[n]` citation to a fact id without parsing the answer.
 - New opinions are bound to already-known entities (case-insensitive canonical/variant match, longest surface wins, no entity creation) and written by `insert_opinion` in one transaction: opinion row with `chunk_id = NULL`, optional vector, FTS row, deduplicated bindings. The model's `reasoning` is kept in `attrs.reasoning` rather than appended to `text`: A.2 wants it woven naturally into the statement, so splicing it mechanically would corrupt the phrasing, while `attrs` remains auditable and stays out of the retrieval corpus and embedding.
-- Existing opinions are **not** reinforced yet: the Assess path (`c ± α`, `c − 2α` on contradiction, optional text rewrite) is designed but deferred with the opinion-update semantics (P1-15/P3-5). Until then the reflect path only creates rows.
+- Existing opinions are **not** reinforced yet (P3-5, pending): the Assess path (`c ± α`, `c − 2α` on contradiction, optional text rewrite) is designed but deferred with the opinion-update semantics (blocked on P1-15). Until then reflect only creates rows and the retain worker commits an empty `opinion_updates`, so an opinion's confidence and text never change after formation.
 
 ### 2.4 observe (Observation Synthesis + GC)
 

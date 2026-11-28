@@ -1194,7 +1194,7 @@ async fn insert_opinion(&self, opinion:NewOpinion) -> Result<()>;  // now implem
 
 ## P3-5 Reinforcement Reuse
 
-**Status**: ❌
+**Status**: ❌ (blocked on P1-15)
 
 - **Design**: after reflect, call the same `reinforce()` entry point for new and existing opinions.
 - **Acceptance**: no logic fork (one implementation).
