@@ -220,6 +220,42 @@ async fn persistence_can_be_disabled() {
 }
 
 #[tokio::test]
+async fn read_only_reflect_needs_no_opinion_embedding() {
+  let (sqlite, store, bank, llm) = setup().await;
+  insert_fact(sqlite.pool(), bank, "Alice ships reliably", false).await;
+
+  llm.push(
+    "reflect",
+    json!({
+      "answer": "Alice ships reliably [1].",
+      "opinions": [{ "opinion": "I think Alice is dependable", "confidence": 0.7, "reasoning": "r" }]
+    }),
+  );
+
+  // No Embedder is wired at all (`with_llm`, not `with_models`), and the recall
+  // options use the lexical channel only; read-only reflect must still work
+  // because nothing needs a vector.
+  let llm: Arc<dyn engine::ports::Llm> = llm.clone();
+  let memory = MemoryBank::new(
+    store,
+    Arc::new(FixedClock(ts(1_000))),
+    RetainConfig::default(),
+  )
+  .with_llm(llm);
+
+  let mut opts = options();
+  opts.persist_opinions = false;
+  opts.recall.channels = ChannelMask::only(engine::recall::Channel::Bm25);
+  let result = memory
+    .reflect(bank, "Is Alice dependable?", opts)
+    .await
+    .expect("read-only reflect without an embedder");
+
+  assert!(result.opinions_formed.is_empty());
+  assert!(result.has_evidence());
+}
+
+#[tokio::test]
 async fn reflect_requires_an_llm() {
   let (_, store, bank, _llm) = setup().await;
   let memory = MemoryBank::new(

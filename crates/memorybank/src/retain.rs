@@ -112,6 +112,17 @@ impl MemoryBank {
     self
   }
 
+  /// Adds only the language model.
+  ///
+  /// Recall and reflect validate their ports where they use them, so a caller
+  /// that never embeds (lexical-only recall, or a read-only reflect) can leave
+  /// the embedder unset. [`MemoryBank::with_models`] wires both at once for the
+  /// retain pipeline, which always embeds.
+  pub fn with_llm(mut self, llm: Arc<dyn Llm>) -> Self {
+    self.llm = Some(llm);
+    self
+  }
+
   /// Adds the recall-side ports: reranker and temporal parser.
   pub fn with_recall_models(
     mut self,
@@ -119,6 +130,18 @@ impl MemoryBank {
     temporal_parser: Arc<dyn TemporalParser>,
   ) -> Self {
     self.reranker = Some(reranker);
+    self.temporal_parser = Some(temporal_parser);
+    self
+  }
+
+  /// Adds only the reranker; useful when the temporal channel is not used.
+  pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+    self.reranker = Some(reranker);
+    self
+  }
+
+  /// Adds only the temporal parser; useful when reranking is disabled.
+  pub fn with_temporal_parser(mut self, temporal_parser: Arc<dyn TemporalParser>) -> Self {
     self.temporal_parser = Some(temporal_parser);
     self
   }
@@ -163,25 +186,20 @@ impl MemoryBank {
     query: &str,
     options: RecallOptions,
   ) -> Result<RecallResult> {
-    let embedder = self
-      .embedder
-      .as_ref()
-      .ok_or_else(|| Error::config("recall requires an Embedder"))?;
-    let reranker = self
-      .reranker
-      .as_ref()
-      .ok_or_else(|| Error::config("recall requires a Reranker"))?;
-    let parser = self
-      .temporal_parser
-      .as_ref()
-      .ok_or_else(|| Error::config("recall requires a TemporalParser"))?;
+    // Ports are looked up here but validated by the pipeline only when the
+    // options actually need them: a BM25-only call needs no Embedder, and a call
+    // without an explicit time range needs a parser only when the temporal
+    // channel is enabled.
+    let embedder = self.embedder.as_deref();
+    let reranker = self.reranker.as_deref();
+    let parser = self.temporal_parser.as_deref();
 
     let now = now_ts(self.clock.as_ref());
     let result = recall(
       self.store.as_ref(),
-      embedder.as_ref(),
-      reranker.as_ref(),
-      parser.as_ref(),
+      embedder,
+      reranker,
+      parser,
       self.estimator.as_ref(),
       bank,
       query,

@@ -512,7 +512,42 @@ async fn recall_returns_empty_for_an_empty_bank() {
 }
 
 #[tokio::test]
-async fn recall_requires_an_embedder() {
+async fn recall_without_the_semantic_channel_needs_no_embedder() {
+  let (sqlite, store, bank) = setup().await;
+  insert_fact(
+    sqlite.pool(),
+    bank,
+    FactType::World,
+    "Emily works at Google",
+    None,
+    None,
+  )
+  .await;
+
+  // No embedder at all: a lexical-only call must still work.
+  let memory = MemoryBank::new(
+    store,
+    Arc::new(FixedClock(ts(1_000))),
+    RetainConfig::default(),
+  );
+  let result = memory
+    .recall(
+      bank,
+      "Emily",
+      RecallOptions {
+        channels: ChannelMask::only(Channel::Bm25),
+        rerank_top_n: 0,
+        ..RecallOptions::default()
+      },
+    )
+    .await
+    .expect("bm25 without an embedder");
+
+  assert_eq!(result.facts.len(), 1);
+}
+
+#[tokio::test]
+async fn recall_requires_an_embedder_for_the_semantic_channel() {
   let (_, store, bank) = setup().await;
   let memory = MemoryBank::new(
     store,
@@ -526,4 +561,134 @@ async fn recall_requires_an_embedder() {
     .await
     .expect_err("no embedder");
   assert!(matches!(error, engine::Error::Config(_)), "error: {error}");
+}
+
+#[tokio::test]
+async fn reranking_without_a_reranker_is_configuration_error() {
+  let (sqlite, store, bank) = setup().await;
+  insert_fact(
+    sqlite.pool(),
+    bank,
+    FactType::World,
+    "Emily works at Google",
+    None,
+    None,
+  )
+  .await;
+
+  // Embedder and parser are wired; only the reranker is missing.
+  let memory = MemoryBank::new(
+    store,
+    Arc::new(FixedClock(ts(1_000))),
+    RetainConfig::default(),
+  )
+  .with_models(
+    Arc::new(engine::testing::FakeLlm::new()),
+    Arc::new(HashEmbedder::new(EMBEDDING_DIM)),
+  )
+  .with_temporal_parser(Arc::new(RuleTemporalParser));
+
+  let error = memory
+    .recall(
+      bank,
+      "Emily",
+      RecallOptions {
+        channels: ChannelMask::only(Channel::Bm25),
+        rerank_top_n: 5,
+        ..RecallOptions::default()
+      },
+    )
+    .await
+    .expect_err("reranking needs a reranker");
+
+  assert!(matches!(error, engine::Error::Config(_)), "error: {error}");
+  assert!(error.to_string().contains("Reranker"), "error: {error}");
+}
+
+#[tokio::test]
+async fn the_temporal_channel_without_a_parser_is_a_configuration_error() {
+  let (sqlite, store, bank) = setup().await;
+  insert_fact(
+    sqlite.pool(),
+    bank,
+    FactType::World,
+    "Emily works at Google",
+    None,
+    Some(hour(2)),
+  )
+  .await;
+
+  // No parser wired, and no explicit range either.
+  let memory = MemoryBank::new(
+    store,
+    Arc::new(FixedClock(ts(1_000))),
+    RetainConfig::default(),
+  )
+  .with_models(
+    Arc::new(engine::testing::FakeLlm::new()),
+    Arc::new(HashEmbedder::new(EMBEDDING_DIM)),
+  );
+
+  let error = memory
+    .recall(
+      bank,
+      "what happened yesterday",
+      RecallOptions {
+        channels: ChannelMask::only(Channel::Temporal),
+        rerank_top_n: 0,
+        ..RecallOptions::default()
+      },
+    )
+    .await
+    .expect_err("temporal needs a parser");
+
+  assert!(matches!(error, engine::Error::Config(_)), "error: {error}");
+  assert!(
+    error.to_string().contains("TemporalParser"),
+    "error: {error}"
+  );
+}
+
+#[tokio::test]
+async fn an_explicit_time_range_does_not_need_a_parser() {
+  let (sqlite, store, bank) = setup().await;
+  let timed = insert_fact(
+    sqlite.pool(),
+    bank,
+    FactType::World,
+    "Emily joined the team",
+    None,
+    Some(hour(3)),
+  )
+  .await;
+
+  // Same bank as above: no parser is wired, but the caller supplies the range.
+  let memory = MemoryBank::new(
+    store,
+    Arc::new(FixedClock(ts(1_000))),
+    RetainConfig::default(),
+  )
+  .with_models(
+    Arc::new(engine::testing::FakeLlm::new()),
+    Arc::new(HashEmbedder::new(EMBEDDING_DIM)),
+  );
+
+  let result = memory
+    .recall(
+      bank,
+      "irrelevant text",
+      RecallOptions {
+        channels: ChannelMask::only(Channel::Temporal),
+        time_range: Some(engine::types::TimeRange {
+          start: ts(hour(2)),
+          end: ts(hour(4)),
+        }),
+        rerank_top_n: 0,
+        ..RecallOptions::default()
+      },
+    )
+    .await
+    .expect("explicit range needs no parser");
+
+  assert_eq!(result.ids(), vec![timed]);
 }

@@ -1026,6 +1026,12 @@ impl MemoryBank {
   `engine::recall::recall` is pure orchestration: embed the query **once**, run the
   enabled channels (each truncated to `per_channel_k`), fuse with RRF, reload the
   fused ids in order, optionally rerank the head, then pack into `token_budget`.
+  Ports are required only when actually used: `embedder` for the semantic channel,
+  `reranker` when `rerank_top_n > 0`, `temporal_parser` for the temporal channel
+  unless `time_range` supplies the range. Each is `Option<&dyn …>` and an unused
+  port may be `None`. The facade mirrors this with per-port builders
+  (`with_llm`, `with_reranker`, `with_temporal_parser`) so a caller can wire only
+  what its configuration uses.
   Defaults bind an `IdentityReranker` and `RuleTemporalParser`; `MemoryBank::recall`
   also performs a best-effort `increment_access` on the returned facts and never
   fails recall when the counter write fails. The graph channel is seeded from the
@@ -1039,11 +1045,14 @@ impl MemoryBank {
   embedded only once; RRF → rerank → pack order fixed; budget respected; scope
   and explicit time range honored (a `time_range` with the temporal channel
   disabled logs a warning because it has no effect); access counters are
-  best-effort.
+  best-effort; a call whose options need no embedder/reranker/parser succeeds
+  without those ports wired.
 - **Tests**: multi-channel provenance; budget truncation; disabled channels and
-  `NONE`; scope isolation; explicit time range; empty bank; missing embedder is
-  `Config`; channel-mask/provenance helpers; semantic scores survive truncation
-  so the graph channel seeds from cosine rather than rank.
+  `NONE`; scope isolation; explicit time range; empty bank; channel-mask/provenance
+  helpers; semantic scores survive truncation so the graph channel seeds from
+  cosine rather than rank; each use-site port check has its own case — semantic
+  without an `Embedder`, reranking without a `Reranker`, temporal without a
+  `TemporalParser`, and an explicit `time_range` that needs no parser.
 
 ## P2-10 Performance Baseline
 
@@ -1255,7 +1264,8 @@ impl MemoryBank {
 ```
   Flow: recall the query → `load_bank` → `system_message` → one `reflect_llm`
   call → `prepare_opinion` + `insert_opinion` per draft. An empty query is rejected
-  before any model call. Each opinion id is allocated before its insert, so a
+  before any model call. The `Embedder` is required only when
+  `persist_opinions = true`, so a read-only reflect call never needs one. Each opinion id is allocated before its insert, so a
   transport failure writes nothing and a retry starts clean; each opinion commits
   in its own transaction, so a partial batch leaves the successful rows and returns
   the error. `persist_opinions = false` supports read-only reflection. Recall's

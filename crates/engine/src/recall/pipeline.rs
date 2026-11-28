@@ -136,6 +136,11 @@ impl Default for RecallOptions {
 
 /// Runs the recall pipeline for `query`.
 ///
+/// Each port is required only when something actually needs it: an `Embedder`
+/// for the semantic channel, a `Reranker` when `rerank_top_n > 0`, and a
+/// `TemporalParser` for the temporal channel unless `time_range` supplies the
+/// range directly. Passing `None` for a port that is not needed is valid.
+///
 /// The query is embedded **once**, and each enabled channel is limited to
 /// `per_channel_k` candidates. The graph channel is seeded from the semantic
 /// hits, so it requires the semantic channel; the temporal channel uses
@@ -156,9 +161,9 @@ impl Default for RecallOptions {
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(
   store: &dyn Store,
-  embedder: &dyn Embedder,
-  reranker: &dyn Reranker,
-  temporal_parser: &dyn TemporalParser,
+  embedder: Option<&dyn Embedder>,
+  reranker: Option<&dyn Reranker>,
+  temporal_parser: Option<&dyn TemporalParser>,
   estimator: &dyn TokenEstimator,
   bank: BankId,
   query: &str,
@@ -173,6 +178,8 @@ pub async fn recall(
   }
 
   let embedding = if options.channels.semantic {
+    let embedder =
+      embedder.ok_or_else(|| Error::config("the semantic channel requires an Embedder"))?;
     embed_one(embedder, query).await?
   } else {
     None
@@ -230,12 +237,17 @@ pub async fn recall(
         .await?
       }
       None => {
+        let parser = temporal_parser.ok_or_else(|| {
+          Error::config(
+            "the temporal channel requires a TemporalParser without an explicit time_range",
+          )
+        })?;
         temporal_channel(
           store,
           bank,
           query,
           now,
-          temporal_parser,
+          parser,
           &options.temporal,
           &options.scope,
         )
@@ -262,6 +274,7 @@ pub async fn recall(
   let reranked: Vec<Fact> = if options.rerank_top_n == 0 {
     loaded
   } else {
+    let reranker = reranker.ok_or_else(|| Error::config("reranking requires a Reranker"))?;
     rerank_top(reranker, query, &loaded, options.rerank_top_n).await
   };
 

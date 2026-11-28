@@ -72,10 +72,6 @@ impl MemoryBank {
       .llm
       .as_ref()
       .ok_or_else(|| Error::config("reflect requires an Llm"))?;
-    let embedder = self
-      .embedder
-      .as_ref()
-      .ok_or_else(|| Error::config("reflect requires an Embedder"))?;
 
     let recalled = self.recall(bank, query, options.recall.clone()).await?;
     let bank_row = self.store.load_bank(bank).await?;
@@ -84,6 +80,12 @@ impl MemoryBank {
     let response = reflect_llm(llm.as_ref(), system, query, &options.llm).await?;
 
     let opinions_formed = if options.persist_opinions {
+      // Only persistence needs the embedder; a read-only reflect call works
+      // without one.
+      let embedder = self
+        .embedder
+        .as_ref()
+        .ok_or_else(|| Error::config("persisting opinions requires an Embedder"))?;
       self
         .persist_opinions(bank, &response.opinions, embedder.as_ref())
         .await?
