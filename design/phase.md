@@ -1135,7 +1135,9 @@ pub async fn reflect_llm(llm:&dyn Llm, system:String, query:&str,
   One structured call with `schema_name = "reflect"`: the assembled system message
   from P3-2 plus a fixed user prompt (`prompts/reflect.md`) carrying the question,
   grounding/citation rules, the first-person opinion rules from A.2, and the JSON
-  output contract. Validation: an empty `answer` is `Fatal` (contract violation);
+  output contract. A.2's separate second-pass extraction (`ANSWER PROVIDED: {text}`)
+  is folded into this single call per §5.4.2, so the rules are reused but the extra
+  round trip is not (see `design.md` §2.3). Validation: an empty `answer` is `Fatal` (contract violation);
   an empty `opinions` list is valid. Drafts are normalized in place — confidence is
   clamped to `[0, 1]`, a non-finite value falls back to
   `default_opinion_confidence` (itself clamped), and drafts with blank text are
